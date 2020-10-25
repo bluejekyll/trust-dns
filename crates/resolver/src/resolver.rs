@@ -10,15 +10,18 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::Mutex;
 
+use proto::rr::domain::TryParseIp;
+use proto::rr::IntoName;
 use proto::rr::RecordType;
 use tokio::runtime::{self, Runtime};
 
-use config::{ResolverConfig, ResolverOpts};
-use error::*;
-use lookup;
-use lookup::Lookup;
-use lookup_ip::LookupIp;
-use AsyncResolver;
+use crate::config::{ResolverConfig, ResolverOpts};
+use crate::error::*;
+use crate::lookup;
+use crate::lookup::Lookup;
+use crate::lookup_ip::LookupIp;
+use crate::name_server::{TokioConnection, TokioConnectionProvider};
+use crate::AsyncResolver;
 
 /// The Resolver is used for performing DNS queries.
 ///
@@ -32,33 +35,33 @@ pub struct Resolver {
     //   drawbacks. One major issues, is if this Resolver is shared across threads, it will cause all to block on any
     //   query. A TLS on the other hand would not, at the cost of only allowing a Resolver to be configured once per Thread
     runtime: Mutex<Runtime>,
-    async_resolver: AsyncResolver,
+    async_resolver: AsyncResolver<TokioConnection, TokioConnectionProvider>,
 }
 
 macro_rules! lookup_fn {
     ($p:ident, $l:ty) => {
-/// Performs a lookup for the associated type.
-///
-/// *hint* queries that end with a '.' are fully qualified names and are cheaper lookups
-///
-/// # Arguments
-///
-/// * `query` - a `&str` which parses to a domain name, failure to parse will return an error
-pub fn $p(&self, query: &str) -> ResolveResult<$l> {
-    let lookup = self.async_resolver.$p(query);
-    self.runtime.lock()?.block_on(lookup)
-}
+        /// Performs a lookup for the associated type.
+        ///
+        /// *hint* queries that end with a '.' are fully qualified names and are cheaper lookups
+        ///
+        /// # Arguments
+        ///
+        /// * `query` - a `&str` which parses to a domain name, failure to parse will return an error
+        pub fn $p<N: IntoName>(&self, query: N) -> ResolveResult<$l> {
+            let lookup = self.async_resolver.$p(query);
+            self.runtime.lock()?.block_on(lookup)
+        }
     };
     ($p:ident, $l:ty, $t:ty) => {
-/// Performs a lookup for the associated type.
-///
-/// # Arguments
-///
-/// * `query` - a type which can be converted to `Name` via `From`.
-pub fn $p(&self, query: $t) -> ResolveResult<$l> {
-    let lookup = self.async_resolver.$p(query);
-    self.runtime.lock()?.block_on(lookup)
-}
+        /// Performs a lookup for the associated type.
+        ///
+        /// # Arguments
+        ///
+        /// * `query` - a type which can be converted to `Name` via `From`.
+        pub fn $p(&self, query: $t) -> ResolveResult<$l> {
+            let lookup = self.async_resolver.$p(query);
+            self.runtime.lock()?.block_on(lookup)
+        }
     };
 }
 
@@ -74,12 +77,12 @@ impl Resolver {
     /// A new `Resolver` or an error if there was an error with the configuration.
     pub fn new(config: ResolverConfig, options: ResolverOpts) -> io::Result<Self> {
         let mut builder = runtime::Builder::new();
-        builder.core_threads(1);
+        builder.basic_scheduler();
+        builder.enable_all();
 
-        let mut runtime = builder.build()?;
-        let (async_resolver, bg) = AsyncResolver::new(config, options);
-
-        runtime.spawn(bg);
+        let runtime = builder.build()?;
+        let async_resolver = AsyncResolver::new(config, options, runtime.handle().clone())
+            .expect("failed to create resolver");
 
         Ok(Resolver {
             runtime: Mutex::new(runtime),
@@ -102,6 +105,7 @@ impl Resolver {
     ///
     /// This will use `/etc/resolv.conf` on Unix OSes and the registry on Windows.
     #[cfg(any(unix, target_os = "windows"))]
+    #[cfg(feature = "system-config")]
     pub fn from_system_conf() -> io::Result<Self> {
         let (config, options) = super::system_conf::read_system_conf()?;
         Self::new(config, options)
@@ -115,8 +119,10 @@ impl Resolver {
     ///
     /// * `name` - name of the record to lookup, if name is not a valid domain name, an error will be returned
     /// * `record_type` - type of record to lookup
-    pub fn lookup(&self, name: &str, record_type: RecordType) -> ResolveResult<Lookup> {
-        let lookup = self.async_resolver.lookup(name, record_type);
+    pub fn lookup<N: IntoName>(&self, name: N, record_type: RecordType) -> ResolveResult<Lookup> {
+        let lookup = self
+            .async_resolver
+            .lookup(name, record_type, Default::default());
         self.runtime.lock()?.block_on(lookup)
     }
 
@@ -127,35 +133,8 @@ impl Resolver {
     /// # Arguments
     ///
     /// * `host` - string hostname, if this is an invalid hostname, an error will be returned.
-    pub fn lookup_ip(&self, host: &str) -> ResolveResult<LookupIp> {
+    pub fn lookup_ip<N: IntoName + TryParseIp>(&self, host: N) -> ResolveResult<LookupIp> {
         let lookup = self.async_resolver.lookup_ip(host);
-        self.runtime.lock()?.block_on(lookup)
-    }
-
-    /// Performs a DNS lookup for an SRV record for the specified service type and protocol at the given name.
-    ///
-    /// This is a convenience method over `lookup_srv`, it combines the service, protocol and name into a single name: `_service._protocol.name`.
-    ///
-    /// # Arguments
-    ///
-    /// * `service` - service to lookup, e.g. ldap or http
-    /// * `protocol` - wire protocol, e.g. udp or tcp
-    /// * `name` - zone or other name at which the service is located.
-    #[deprecated(note = "use lookup_srv instead, this interface is not ideal")]
-    pub fn lookup_service(
-        &self,
-        service: &str,
-        protocol: &str,
-        name: &str,
-    ) -> ResolveResult<lookup::SrvLookup> {
-        #[allow(deprecated)]
-        let lookup = self.async_resolver.lookup_service(service, protocol, name);
-        self.runtime.lock()?.block_on(lookup)
-    }
-
-    /// Lookup an SRV record.
-    pub fn lookup_srv(&self, name: &str) -> ResolveResult<lookup::SrvLookup> {
-        let lookup = self.async_resolver.lookup_srv(name);
         self.runtime.lock()?.block_on(lookup)
     }
 
@@ -163,13 +142,16 @@ impl Resolver {
     lookup_fn!(ipv4_lookup, lookup::Ipv4Lookup);
     lookup_fn!(ipv6_lookup, lookup::Ipv6Lookup);
     lookup_fn!(mx_lookup, lookup::MxLookup);
-    #[deprecated(note = "use lookup_srv instead, this interface is not ideal")]
+    lookup_fn!(ns_lookup, lookup::NsLookup);
+    lookup_fn!(soa_lookup, lookup::SoaLookup);
     lookup_fn!(srv_lookup, lookup::SrvLookup);
     lookup_fn!(txt_lookup, lookup::TxtLookup);
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
+
     use std::net::*;
 
     use super::*;

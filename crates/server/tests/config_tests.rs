@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 extern crate log;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_proto;
 extern crate trust_dns_server;
 
@@ -28,8 +28,9 @@ use trust_dns_server::config::*;
 
 #[test]
 fn test_read_config() {
-    let server_path = env::var("TDNS_SERVER_SRC_ROOT").unwrap_or_else(|_| ".".to_owned());
-    let path: PathBuf = PathBuf::from(server_path).join("tests/named_test_configs/example.toml");
+    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
+    let path: PathBuf =
+        PathBuf::from(server_path).join("tests/test-data/named_test_configs/example.toml");
 
     if !path.exists() {
         panic!("can't locate example.toml and other configs: {:?}", path)
@@ -154,8 +155,8 @@ fn test_parse_toml() {
 #[cfg(feature = "dnssec")]
 #[test]
 fn test_parse_zone_keys() {
-    use trust_dns::rr::dnssec::Algorithm;
-    use trust_dns::rr::Name;
+    use trust_dns_client::rr::dnssec::Algorithm;
+    use trust_dns_client::rr::Name;
 
     let config: Config = "
 [[zones]]
@@ -254,7 +255,9 @@ tls_listen_port = 8853
 }
 
 fn test_config(path: &str) {
-    let path = PathBuf::from("tests/named_test_configs")
+    let workspace = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
+    let path = PathBuf::from(workspace)
+        .join("tests/test-data/named_test_configs")
         .join(path)
         .with_extension("toml");
     assert!(path.exists(), "does not exist: {}", path.display());
@@ -275,6 +278,7 @@ define_test_config!(all_supported_dnssec);
 define_test_config!(dns_over_https);
 define_test_config!(dns_over_tls_rustls_and_openssl);
 define_test_config!(dns_over_tls);
+#[cfg(feature = "sqlite")]
 define_test_config!(dnssec_with_update);
 define_test_config!(dnssec_with_update_deprecated);
 define_test_config!(example);

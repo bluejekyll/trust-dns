@@ -18,15 +18,14 @@
 
 use std::net::Ipv4Addr;
 use std::str::FromStr;
-use error::*;
+
+use crate::error::*;
 
 /// Parse the RData from a set of Tokens
 pub fn parse<'i, I: Iterator<Item = &'i str>>(mut tokens: I) -> ParseResult<Ipv4Addr> {
     let address: Ipv4Addr = tokens
         .next()
-        .ok_or_else(|| {
-            ParseError::from(ParseErrorKind::MissingToken("ipv4 address".to_string()))
-        })
+        .ok_or_else(|| ParseError::from(ParseErrorKind::MissingToken("ipv4 address".to_string())))
         .and_then(|s| Ipv4Addr::from_str(s).map_err(Into::into))?;
     Ok(address)
 }

@@ -7,7 +7,7 @@
 
 //! Module for `Catalog` of `Authority` zones which are responsible for storing `RRSet` records.
 
-use trust_dns::op::ResponseCode;
+use trust_dns_client::op::ResponseCode;
 
 /// Result of an Update operation
 pub type UpdateResult<T> = Result<T, ResponseCode>;
@@ -26,7 +26,7 @@ pub use self::auth_lookup::{
     AnyRecords, AuthLookup, AuthLookupIter, LookupRecords, LookupRecordsIter,
 };
 pub use self::authority::Authority;
-pub use self::authority_object::{AuthorityObject, BoxedLookupFuture, LookupObject};
+pub use self::authority_object::{AuthorityObject, BoxedLookupFuture, EmptyLookup, LookupObject};
 pub use self::catalog::Catalog;
 pub use self::error::{LookupError, LookupResult};
 pub use self::message_request::{MessageRequest, Queries, UpdateRequest};

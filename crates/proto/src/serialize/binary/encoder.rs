@@ -127,7 +127,7 @@ impl<'a> BinEncoder<'a> {
 
         BinEncoder {
             offset: offset as usize,
-            // FIXME: add max_size to signature
+            // TODO: add max_size to signature
             buffer: private::MaximalBuf::new(u16::max_value(), buf),
             name_pointers: Vec::new(),
             mode,
@@ -374,6 +374,7 @@ impl<'a> BinEncoder<'a> {
     }
 
     /// emits all items in the iterator, return the number emitted
+    #[allow(clippy::needless_return)]
     pub fn emit_iter<'e, I: Iterator<Item = &'e E>, E: 'e + BinEncodable>(
         &mut self,
         iter: &mut I,

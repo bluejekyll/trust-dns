@@ -1,5 +1,4 @@
-[![Build Status](https://travis-ci.org/bluejekyll/trust-dns.svg?branch=master)](https://travis-ci.org/bluejekyll/trust-dns)
-[![Build status](https://ci.appveyor.com/api/projects/status/tmlih8wdt7628vyl/branch/master?svg=true)](https://ci.appveyor.com/project/bluejekyll/trust-dns/branch/master)
+[![Build Status](https://github.com/bluejekyll/trust-dns/workflows/test/badge.svg?branch=master)](https://github.com/bluejekyll/trust-dns/actions?query=workflow%3Atest)
 [![codecov](https://codecov.io/gh/bluejekyll/trust-dns/branch/master/graph/badge.svg)](https://codecov.io/gh/bluejekyll/trust-dns)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE-APACHE)
@@ -17,13 +16,15 @@ This repo consists of multiple crates:
 
 | Library | Description |
 |---------|-------------|
+| **Trust-DNS** | [![](http://meritbadge.herokuapp.com/trust-dns)](https://crates.io/crates/trust-dns) Binaries for running a DNS authoritative server. |
 | **Proto** | [![](http://meritbadge.herokuapp.com/trust-dns-proto)](https://crates.io/crates/trust-dns-proto) [![trust-dns-proto](https://docs.rs/trust-dns-proto/badge.svg)](https://docs.rs/trust-dns-proto) Raw DNS library, exposes an unstable API and only for use by the other Trust-DNS libraries, not intended for end-user use. |
-| **Client** | [![](http://meritbadge.herokuapp.com/trust-dns)](https://crates.io/crates/trust-dns) [![trust-dns](https://docs.rs/trust-dns/badge.svg)](https://docs.rs/trust-dns) Used for sending `query`, `update`, and `notify` messages directly to a DNS server. |
+| **Client** | [![](http://meritbadge.herokuapp.com/trust-dns-client)](https://crates.io/crates/trust-dns-client) [![trust-dns-client](https://docs.rs/trust-dns-client/badge.svg)](https://docs.rs/trust-dns-client) Used for sending `query`, `update`, and `notify` messages directly to a DNS server. |
 | **Server** | [![](http://meritbadge.herokuapp.com/trust-dns-server)](https://crates.io/crates/trust-dns-server) [![trust-dns-server](https://docs.rs/trust-dns-server/badge.svg)](https://docs.rs/trust-dns-server) Use to host DNS records, this also has a `named` binary for running in a daemon form. |
 | **Resolver** | [![](http://meritbadge.herokuapp.com/trust-dns-resolver)](https://crates.io/crates/trust-dns-resolver) [![trust-dns-resolver](https://docs.rs/trust-dns-resolver/badge.svg)](https://docs.rs/trust-dns-resolver) Utilizes the client library to perform DNS resolution. Can be used in place of the standard OS resolution facilities. |
 | **Rustls** | [![](http://meritbadge.herokuapp.com/trust-dns-rustls)](https://crates.io/crates/trust_dns_rustls) [![trust-dns-rustls](https://docs.rs/trust-dns-rustls/badge.svg)](https://docs.rs/trust-dns-rustls) Implementation of DNS over TLS protocol using the rustls and ring libraries. |
 | **NativeTls** | [![](http://meritbadge.herokuapp.com/trust-dns-native-tls)](https://crates.io/crates/trust_dns_native_tls) [![trust-dns-native-tls](https://docs.rs/trust-dns-native-tls/badge.svg)](https://docs.rs/trust-dns-native-tls) Implementation of DNS over TLS protocol using the Host OS' provided default TLS libraries |
 | **OpenSsl** | [![](http://meritbadge.herokuapp.com/trust-dns-openssl)](https://crates.io/crates/trust_dns_openssl) [![trust-dns-openssl](https://docs.rs/trust-dns-openssl/badge.svg)](https://docs.rs/trust-dns-openssl) Implementation of DNS over TLS protocol using OpenSSL |
+
 
 # Goals
 
@@ -37,18 +38,15 @@ This repo consists of multiple crates:
 
 # Status:
 
+## Resolver
+
+The Trust-DNS Resolver is a native Rust implementation for stub resolution in Rust applications. The Resolver supports many common query patterns, all of which can be configured when creating the Resolver. It is capable of using system configuration on Unix and Windows. On Windows there is a known issue that relates to a large set of interfaces being registered for use, so might require ignoring the system configuration.
+
+The Resolver will properly follow CNAME chains as well as SRV record lookups. There is a long term plan to make the Resolver capable of fully recursive queries, but that's not currently possible.
+
 ## Client
 
-Using the ClientFuture is safe. ClientFuture is a brand new rewrite of the old
- Client. It has all the same features as the old Client, but is written with the
- wonderful futures-rs library. Please send feedback! It currently does not cache
- responses, if this is a feature you'd like earlier rather than later, post a
- request. The validation of DNSSec is complete including NSEC. As of now NSEC3
- is broken, and I may never plan to support it. I have some alternative ideas
- for private data in the zone. The old Client has been deprecated, so please
- use the ClientFuture. If this is an inconvenience, I may add a convenience
- wrapper around ClientFuture that would match the old Client; if this is something
- you would like to see, please file an issue.
+The Trust-DNS Client is intended to be used for operating against a DNS server directly. It can be used for verifying records or updating records for servers that support SIG0 and dynamic update. The Client is also capable of validating DNSSEC. As of now NSEC3 validation is not yet supported, though NSEC is. There are two interfaces that can be used, the async/await compatible AsyncClient  and a blocking Client for ease of use. Today, Tokio is required for the executor Runtime.
 
 ### Unique client side implementations
 
@@ -57,7 +55,7 @@ These are standards supported by the DNS protocol. The client implements them
 
 | Feature | Description |
 |---------|-------------|
-| [SecureSyncClient](https://docs.rs/trust-dns/0.11.0/trust_dns/client/struct.SecureSyncClient.html) | DNSSec validation |
+| [SyncDnssecClient](https://docs.rs/trust-dns/0.11.0/trust_dns/client/struct.SyncDnssecClient.html) | DNSSec validation |
 | [create](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.create) | atomic create of a record, with authenticated request |
 | [append](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.append) | verify existence of a record and append to it |
 | [compare_and_swap](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.compare_and_swap) | atomic (depends on server) compare and swap |
@@ -65,10 +63,6 @@ These are standards supported by the DNS protocol. The client implements them
 | [delete_rrset](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.delete_rrset) | delete an entire record set |
 | [delete_all](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.delete_all) | delete all records sets with a given name |
 | [notify](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.notify) | notify server that it should reload a zone |
-
-### DNS over TLS on the Client
-
-DNS over TLS is supported. This is accomplished through the use of `rust-native-tls`. To use DNS over TLS with the `Client`, the `TlsClientConnection` should be used. See the `TlsClientConnectionBuilder::add_ca()` method. Similarly, to use the tokio `ClientFuture` the `TlsClientStream` should be used. ClientAuth, mTLS, is currently not supported, there are some issues still being worked on. TLS is supported for Server validation and connection privacy.
 
 ## Server
 
@@ -95,9 +89,17 @@ Zone signing support is complete, to insert a key store a pem encoded rsa file
  key rotation. Rotating the key currently is not available online and requires
  a restart of the server process.
 
-### DNS over TLS on the Server
+### DNS-over-TLS and DNS-over-HTTPS on the Server
 
-Support of TLS on the Server is managed through a pkcs12 der file. The documentation is captured in the example test config file, [example.toml](https://github.com/bluejekyll/trust-dns/blob/master/crates/server/tests/named_test_configs/example.toml). A registered certificate to the server can be pinned to the Client with the `add_ca()` method. Alternatively, as the client uses the rust-native-tls library, it should work with certificate signed by any standard CA.
+Support of TLS on the Server is managed through a pkcs12 der file. The documentation is captured in the example test config file, [example.toml](https://github.com/bluejekyll/trust-dns/blob/master/crates/server/tests/test-data/named_test_configs/example.toml). A registered certificate to the server can be pinned to the Client with the `add_ca()` method. Alternatively, as the client uses the rust-native-tls library, it should work with certificate signed by any standard CA.
+
+## DNS-over-TLS and DNS-over-HTTPS
+
+DoT and DoH are supported. This is accomplished through the use of one of `native-tls`, `openssl`, or `rustls` (only `rustls` is currently supported for DoH). The Resolver requires only requires valid DoT or DoH resolvers being registered in order to be used.
+
+To use with the `Client`, the `TlsClientConnection` or `HttpsClientConnection` should be used. Similarly, to use with the tokio `AsyncClient` the `TlsClientStream` or `HttpsClientStream` should be used. ClientAuth, mTLS, is currently not supported, there are some issues still being worked on. TLS is useful for Server authentication and connection privacy.
+
+To enable DoT one of the features `dns-over-native-tls`, `dns-over-openssl`, or `dns-over-rustls` must be enabled, `dns-over-https-rustls` is used for DoH.
 
 ## DNSSec status
 
@@ -107,7 +109,7 @@ Currently the root key is hardcoded into the system. This gives validation of
  appear to rate limit the connections, validating RRSIG records back to the root
  can require a significant number of additional queries for those records.
 
-Zones will be automatically resigned on any record updates via dynamic DNS.
+Zones will be automatically resigned on any record updates via dynamic DNS. To enable DNSSEC, one of the features `dnssec-openssl` or `dnssec-rustls` must be enabled.
 
 ## RFCs implemented
 
@@ -166,7 +168,10 @@ presume that the trust-dns repos have already been synced to the local system:
 
 ## Prerequisites
 
--   openssl development libraries (optional in client and resolver, min version 1.0.2)
+### Minimum Rust Version
+
+- The current minimum rustc version for this project is `1.40`
+- OpenSSL development libraries (optional in client and resolver, min version 1.0.2)
 
 ### Mac OS X: using homebrew
 
@@ -187,24 +192,32 @@ presume that the trust-dns repos have already been synced to the local system:
 
 ## Testing
 
--   Unit tests
+Trust-DNS uses `cargo-make` for build workflow management. While running `cargo test` at the project root will work, this is not exhaustive. Install `cargo-make` with `cargo install cargo-make`.
+
+- Default tests
 
     These are good for running on local systems. They will create sockets for
     local tests, but will not attempt to access remote systems. Tests can also
     be run from the crate directory, i.e. `client` or `server` and `cargo test`
 
-```
-  $ scripts/run_tests.sh
+```shell
+$ cargo make
 ```
 
--   Functional/Integration tests
+- Default feature tests
 
-    These will try to use some local system tools for compatibility testing,
-    and also make some remote requests to verify compatibility with other DNS
-    systems. These can not currently be run on Travis for example.
+    Trust-DNS has many features, to quickly test with them or without, there are three targets supported, `default`, `no-default-features`, `all-features`:
 
+```shell
+$ cargo make all-features
 ```
-  $ scripts/run_tests.sh -- --ignored
+
+- Individual feature tests
+
+    Trust-DNS has many features, each individual feature can be tested in dependently, see individual crates for all their features, here is a not necessarily up to date list: `dns-over-rustls`, `dns-over-https-rustls`, `dns-over-native-tls`, `dns-over-openssl`, `dns-dnssec-openssl`, `dns-dnssec-openssl`, `dns-dnssec-ring`, `mdns`. Each feature can be tested with itself as the task target for `cargo-make`:
+
+```shell
+$ cargo make dns-over-https-rustls
 ```
 
 -   Benchmarks
@@ -213,10 +226,10 @@ presume that the trust-dns repos have already been synced to the local system:
 
 ## Building
 
--   Production build, from the `trust-dns` base dir
+-   Production build, from the `trust-dns` base dir, to get all features, just pass the `--all-features` flag.
 
-```
-  $ cargo build --release
+```shell
+$ cargo build --release -p trust-dns
 ```
 
 ## Running
@@ -227,27 +240,28 @@ so this should allow it to work with most internal loads.
 
 -   Verify the version
 
-```
-  $ ./target/release/named --version
+```shell
+$ ./target/release/named --version
 ```
 
 -   Get help
 
-```
-  $ ./target/release/named --help
+```shell
+$ ./target/release/named --help
 ```
 
 -   Launch `named` server with test config
 
-```
-  $ cd server
-  $ ../target/release/named -c ./tests/named_test_configs/example.toml -z ./tests/named_test_configs/ -p 24141
+You may want not passing the `-p` parameter will run on default DNS ports. For the tls features, there are also port options for those, see `trust-dns --help`
+
+```shell
+$ ./target/release/named -c ./tests/test-data/named_test_configs/example.toml -z ./tests/test-data/named_test_configs/ -p 24141
 ```
 
 -   Query the just launched server with `dig`
 
-```
-  $ dig @127.0.0.1 -p 24141 www.example.com
+```shell
+$ dig @127.0.0.1 -p 24141 www.example.com
 ```
 
 ## Using as a dependency and custom features
@@ -267,10 +281,13 @@ The Client has a few features which can be disabled for different reasons when e
     Uses `openssl` for DNS-over-TLS implementation supported in server and client, resolver does not have default CA chains.
 
 - `dns-over-rustls`
-    Uses `rustls` for DNS-over-TLS implementation, only supported in client and resolver, not server. This is the best option where a pure Rust toolchain is desired.
+    Uses `rustls` for DNS-over-TLS implementation, only supported in client and resolver, not server. This is the best option where a pure Rust toolchain is desired. Supported in client, resolver, and server.
+
+- `dns-over-https-rustls`
+    Uses `rustls` for DNS-over-HTTPS (and DNS-over-TLS will be enabled) implementation, only supported in client, resolver, and server. This is the best option where a pure Rust toolchain is desired.
 
 - `mdns` *EXPERIMENTAL*
-    Enables the experimental mDNS features as well as DNS-SD.
+    Enables the experimental mDNS features as well as DNS-SD. This currently has known issues.
 
 Using custom features in dependencies:
 

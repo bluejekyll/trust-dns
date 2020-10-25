@@ -8,14 +8,12 @@
 #![feature(test)]
 
 extern crate test;
-extern crate trust_dns;
-extern crate trust_dns_proto;
 
 use std::str::FromStr;
 
 use test::Bencher;
 
-use trust_dns::rr::*;
+use trust_dns_client::rr::*;
 
 #[bench]
 fn name_cmp_short(b: &mut Bencher) {
@@ -46,7 +44,6 @@ fn name_cmp_medium(b: &mut Bencher) {
         assert_eq!(name1, name2);
     });
 }
-
 
 #[bench]
 fn name_cmp_medium_case(b: &mut Bencher) {

@@ -1,7 +1,8 @@
 [package]
 name = "trust-dns-openssl"
-version = "0.7.0"
+version = "0.20.0"
 authors = ["Benjamin Fry <benjaminfry@me.com>"]
+edition = "2018"
 
 # A short blurb about the package. This is not rendered in any format when
 # uploaded to crates.io (aka this is not markdown)
@@ -10,7 +11,7 @@ Trust-DNS is a safe and secure DNS library. This is an extension for the Trust-D
 """
 
 # These URLs point to more information about the repository
-documentation = "https://docs.rs/trust-dns"
+documentation = "https://docs.rs/trust-dns-openssl"
 homepage = "http://www.trust-dns.org/index.html"
 repository = "https://github.com/bluejekyll/trust-dns"
 
@@ -30,9 +31,13 @@ categories = ["network-programming"]
 license = "MIT/Apache-2.0"
 
 [badges]
-travis-ci = { repository = "bluejekyll/trust-dns" }
-appveyor = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+#github-actions = { repository = "bluejekyll/trust-dns", branch = "master", workflow = "test" }
 codecov = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+maintenance = { status = "actively-developed" }
+
+[features]
+
+dns-over-openssl = []
 
 # WARNING: there is a bug in the mutual tls auth code at the moment see issue #100
 # mtls = ["tls"]
@@ -42,12 +47,12 @@ name = "trust_dns_openssl"
 path = "src/lib.rs"
 
 [dependencies]
-futures = "0.1.28"
+futures = { version = "0.3.5", default-features = false, features = ["std"] }
 openssl = { version = "0.10", features = ["v102", "v110"] }
-tokio-openssl = "0.3"
-tokio-tcp = "0.1"
-trust-dns-proto = { version = "0.8.0", path = "../proto", features = ["openssl"] }
+tokio-openssl = "0.4.0"
+tokio = "0.2.16"
+trust-dns-proto = { version = "0.20.0", path = "../proto", features = ["openssl"] }
 
 [dev-dependencies]
 openssl = { version = "0.10", features = ["v102", "v110"] }
-tokio = "0.1.22"
+tokio = "0.2.16"

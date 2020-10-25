@@ -9,23 +9,25 @@
 
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::future::Future;
 
-use trust_dns::op::LowerQuery;
-use trust_dns::op::ResponseCode;
-use trust_dns::proto::rr::dnssec::rdata::key::KEY;
-use trust_dns::rr::dnssec::{DnsSecResult, Signer, SupportedAlgorithms};
-use trust_dns::rr::{DNSClass, LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
+use trust_dns_client::op::LowerQuery;
+use trust_dns_client::op::ResponseCode;
+use trust_dns_client::proto::rr::dnssec::rdata::key::KEY;
+use trust_dns_client::rr::dnssec::{DnsSecResult, Signer, SupportedAlgorithms};
+use trust_dns_client::rr::{
+    DNSClass, LowerName, Name, RData, Record, RecordSet, RecordType, RrKey,
+};
 
 #[cfg(feature = "dnssec")]
-use authority::UpdateRequest;
-use authority::{Authority, LookupError, MessageRequest, UpdateResult, ZoneType};
-use store::in_memory::InMemoryAuthority;
-use store::sqlite::{Journal, SqliteConfig};
-
-use error::{PersistenceErrorKind, PersistenceResult};
+use crate::authority::UpdateRequest;
+use crate::authority::{Authority, LookupError, MessageRequest, UpdateResult, ZoneType};
+use crate::error::{PersistenceErrorKind, PersistenceResult};
+use crate::store::in_memory::InMemoryAuthority;
+use crate::store::sqlite::{Journal, SqliteConfig};
 
 /// SqliteAuthority is responsible for storing the resource records for a particular zone.
 ///
@@ -69,7 +71,7 @@ impl SqliteAuthority {
         root_dir: Option<&Path>,
         config: &SqliteConfig,
     ) -> Result<Self, String> {
-        use store::file::{FileAuthority, FileConfig};
+        use crate::store::file::{FileAuthority, FileConfig};
 
         let zone_name: Name = origin;
 
@@ -253,6 +255,8 @@ impl SqliteAuthority {
     ///   zone     rrset    rr       RRset exists (value dependent)
     /// ```
     pub fn verify_prerequisites(&self, pre_requisites: &[Record]) -> UpdateResult<()> {
+        use futures::executor::block_on;
+
         //   3.2.5 - Pseudocode for Prerequisite Section Processing
         //
         //      for rr in prerequisites
@@ -305,16 +309,15 @@ impl SqliteAuthority {
                         match require.rr_type() {
                             // ANY      ANY      empty    Name is in use
                             RecordType::ANY => {
-                                if self
-                                    .lookup(
-                                        &required_name,
-                                        RecordType::ANY,
-                                        false,
-                                        SupportedAlgorithms::new(),
-                                    )
-                                    .wait(/*TODO: this works because the future here is always complete*/)
-                                    .unwrap_or_default()
-                                    .was_empty()
+                                /*TODO: this works because the future here is always complete*/
+                                if block_on(self.lookup(
+                                    &required_name,
+                                    RecordType::ANY,
+                                    false,
+                                    SupportedAlgorithms::new(),
+                                ))
+                                .unwrap_or_default()
+                                .was_empty()
                                 {
                                     return Err(ResponseCode::NXDomain);
                                 } else {
@@ -323,16 +326,15 @@ impl SqliteAuthority {
                             }
                             // ANY      rrset    empty    RRset exists (value independent)
                             rrset => {
-                                if self
-                                    .lookup(
-                                        &required_name,
-                                        rrset,
-                                        false,
-                                        SupportedAlgorithms::new(),
-                                    )
-                                    .wait(/*TODO: this works because the future here is always complete*/)
-                                    .unwrap_or_default()
-                                    .was_empty()
+                                /*TODO: this works because the future here is always complete*/
+                                if block_on(self.lookup(
+                                    &required_name,
+                                    rrset,
+                                    false,
+                                    SupportedAlgorithms::new(),
+                                ))
+                                .unwrap_or_default()
+                                .was_empty()
                                 {
                                     return Err(ResponseCode::NXRRSet);
                                 } else {
@@ -349,16 +351,15 @@ impl SqliteAuthority {
                         match require.rr_type() {
                             // NONE     ANY      empty    Name is not in use
                             RecordType::ANY => {
-                                if !self
-                                    .lookup(
-                                        &required_name,
-                                        RecordType::ANY,
-                                        false,
-                                        SupportedAlgorithms::new(),
-                                    )
-                                    .wait(/*TODO: this works because the future here is always complete*/)
-                                    .unwrap_or_default()
-                                    .was_empty()
+                                /*TODO: this works because the future here is always complete*/
+                                if !block_on(self.lookup(
+                                    &required_name,
+                                    RecordType::ANY,
+                                    false,
+                                    SupportedAlgorithms::new(),
+                                ))
+                                .unwrap_or_default()
+                                .was_empty()
                                 {
                                     return Err(ResponseCode::YXDomain);
                                 } else {
@@ -367,16 +368,15 @@ impl SqliteAuthority {
                             }
                             // NONE     rrset    empty    RRset does not exist
                             rrset => {
-                                if !self
-                                    .lookup(
-                                        &required_name,
-                                        rrset,
-                                        false,
-                                        SupportedAlgorithms::new(),
-                                    )
-                                    .wait(/*TODO: this works because the future here is always complete*/)
-                                    .unwrap_or_default()
-                                    .was_empty()
+                                /*TODO: this works because the future here is always complete*/
+                                if !block_on(self.lookup(
+                                    &required_name,
+                                    rrset,
+                                    false,
+                                    SupportedAlgorithms::new(),
+                                ))
+                                .unwrap_or_default()
+                                .was_empty()
                                 {
                                     return Err(ResponseCode::YXRRSet);
                                 } else {
@@ -391,18 +391,17 @@ impl SqliteAuthority {
                 class if class == self.class() =>
                 // zone     rrset    rr       RRset exists (value dependent)
                 {
-                    if self
-                        .lookup(
-                            &required_name,
-                            require.rr_type(),
-                            false,
-                            SupportedAlgorithms::new(),
-                        )
-                        .wait(/*TODO: this works because the future here is always complete*/)
-                        .unwrap_or_default()
-                        .iter()
-                        .find(|rr| *rr == require)
-                        .is_none()
+                    /*TODO: this works because the future here is always complete*/
+                    if block_on(self.lookup(
+                        &required_name,
+                        require.rr_type(),
+                        false,
+                        SupportedAlgorithms::new(),
+                    ))
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|rr| *rr == require)
+                    .is_none()
                     {
                         return Err(ResponseCode::NXRRSet);
                     } else {
@@ -443,8 +442,10 @@ impl SqliteAuthority {
     #[cfg(feature = "dnssec")]
     #[allow(clippy::block_in_if_condition_stmt)]
     pub fn authorize(&self, update_message: &MessageRequest) -> UpdateResult<()> {
+        use futures::executor::block_on;
+
         use proto::rr::dnssec::Verifier;
-        use trust_dns::rr::rdata::{DNSSECRData, DNSSECRecordType};
+        use trust_dns_client::rr::rdata::{DNSSECRData, DNSSECRecordType};
 
         // 3.3.3 - Pseudocode for Permission Checking
         //
@@ -480,14 +481,12 @@ impl SqliteAuthority {
                 .any(|sig| {
                     let name = LowerName::from(sig.signer_name());
                     // TODO: updates should be async as well.
-                    let keys = self
-                        .lookup(
-                            &name,
-                            RecordType::DNSSEC(DNSSECRecordType::KEY),
-                            false,
-                            SupportedAlgorithms::new(),
-                        )
-                        .wait();
+                    let keys = block_on(self.lookup(
+                        &name,
+                        RecordType::DNSSEC(DNSSECRecordType::KEY),
+                        false,
+                        SupportedAlgorithms::new(),
+                    ));
 
                     let keys = match keys {
                         Ok(keys) => keys,
@@ -942,7 +941,7 @@ impl Authority for SqliteAuthority {
         rtype: RecordType,
         is_secure: bool,
         supported_algorithms: SupportedAlgorithms,
-    ) -> Self::LookupFuture {
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Lookup, LookupError>> + Send>> {
         self.in_memory
             .lookup(name, rtype, is_secure, supported_algorithms)
     }
@@ -952,7 +951,7 @@ impl Authority for SqliteAuthority {
         query: &LowerQuery,
         is_secure: bool,
         supported_algorithms: SupportedAlgorithms,
-    ) -> Box<dyn Future<Item = Self::Lookup, Error = LookupError> + Send> {
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Lookup, LookupError>> + Send>> {
         self.in_memory
             .search(query, is_secure, supported_algorithms)
     }
@@ -969,7 +968,7 @@ impl Authority for SqliteAuthority {
         name: &LowerName,
         is_secure: bool,
         supported_algorithms: SupportedAlgorithms,
-    ) -> Self::LookupFuture {
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Lookup, LookupError>> + Send>> {
         self.in_memory
             .get_nsec_records(name, is_secure, supported_algorithms)
     }

@@ -21,6 +21,8 @@ use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use log::debug;
+
 use super::{Edns, Header, MessageType, OpCode, Query, ResponseCode};
 use crate::error::*;
 use crate::rr::{Record, RecordType};
@@ -404,11 +406,21 @@ impl Message {
         &self.queries
     }
 
+    /// Provides mutable access to `queries`
+    pub fn queries_mut(&mut self) -> &mut Vec<Query> {
+        &mut self.queries
+    }
+
     /// ```text
     /// Answer          Carries RRs which directly answer the query.
     /// ```
     pub fn answers(&self) -> &[Record] {
         &self.answers
+    }
+
+    /// Provides mutable access to `answers`
+    pub fn answers_mut(&mut self) -> &mut Vec<Record> {
+        &mut self.answers
     }
 
     /// Removes all the answers from the Message
@@ -425,6 +437,11 @@ impl Message {
         &self.name_servers
     }
 
+    /// Provides mutable access to `name_servers`
+    pub fn name_servers_mut(&mut self) -> &mut Vec<Record> {
+        &mut self.name_servers
+    }
+
     /// Remove the name servers from the Message
     pub fn take_name_servers(&mut self) -> Vec<Record> {
         mem::replace(&mut self.name_servers, vec![])
@@ -436,6 +453,11 @@ impl Message {
     /// ```
     pub fn additionals(&self) -> &[Record] {
         &self.additionals
+    }
+
+    /// Provides mutable access to `additionals`
+    pub fn additionals_mut(&mut self) -> &mut Vec<Record> {
+        &mut self.additionals
     }
 
     /// Remove the additional Records from the Message
@@ -626,6 +648,7 @@ impl Message {
     /// Finalize the message prior to sending.
     ///
     /// Subsequent to calling this, the Message should not change.
+    #[allow(clippy::match_single_binding)]
     pub fn finalize<MF: MessageFinalizer>(
         &mut self,
         finalizer: &MF,
@@ -737,7 +760,7 @@ where
     let place = encoder.place::<Header>()?;
 
     let query_count = queries.emit(encoder)?;
-    // FIXME: need to do some on max records
+    // TODO: need to do something on max records
     //  return offset of last emitted record.
     let answer_count = count_was_truncated(answers.emit(encoder))?;
     let nameserver_count = count_was_truncated(name_servers.emit(encoder))?;
@@ -749,8 +772,6 @@ where
         additional_count.0 += count.0;
         additional_count.1 |= count.1;
     }
-
-    // FIXME: because this is destructive, we need to move message signing here... maybe it will work?
 
     // this is a little hacky, but if we are Verifying a signature, i.e. the original Message
     //  then the SIG0 records should not be encoded and the edns record (if it exists) is already
@@ -792,7 +813,7 @@ impl<'r> BinDecodable<'r> for Message {
     fn read(decoder: &mut BinDecoder<'r>) -> ProtoResult<Self> {
         let header = Header::read(decoder)?;
 
-        // TODO/FIXME: return just header, and in the case of the rest of message getting an error.
+        // TODO: return just header, and in the case of the rest of message getting an error.
         //  this could improve error detection while decoding.
 
         // get the questions

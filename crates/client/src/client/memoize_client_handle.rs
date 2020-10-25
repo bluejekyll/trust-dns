@@ -5,15 +5,19 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::Arc;
 
+use futures::lock::Mutex;
 use futures::Future;
-use proto::error::ProtoError;
-use proto::xfer::{DnsHandle, DnsRequest, DnsResponse};
+use trust_dns_proto::{
+    error::ProtoError,
+    xfer::{DnsHandle, DnsRequest, DnsResponse},
+};
 
-use client::rc_future::{rc_future, RcFuture};
-use client::ClientHandle;
-use op::Query;
+use crate::client::rc_future::{rc_future, RcFuture};
+use crate::client::ClientHandle;
+use crate::op::Query;
 
 // TODO: move to proto
 /// A ClientHandle for memoized (cached) responses to queries.
@@ -39,72 +43,107 @@ where
             active_queries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    async fn inner_send(
+        request: DnsRequest,
+        active_queries: Arc<Mutex<HashMap<Query, RcFuture<<H as DnsHandle>::Response>>>>,
+        mut client: H,
+    ) -> Result<DnsResponse, ProtoError> {
+        // TODO: what if we want to support multiple queries (non-standard)?
+        let query = request.queries().first().expect("no query!").clone();
+
+        // lock all the currently running queries
+        let mut active_queries = active_queries.lock().await;
+
+        // TODO: we need to consider TTL on the records here at some point
+        // If the query is running, grab that existing one...
+        if let Some(rc_future) = active_queries.get(&query) {
+            return rc_future.clone().await;
+        };
+
+        // Otherwise issue a new query and store in the map
+        active_queries
+            .entry(query)
+            .or_insert_with(|| rc_future(client.send(request)))
+            .await
+    }
 }
 
 impl<H> DnsHandle for MemoizeClientHandle<H>
 where
     H: ClientHandle,
 {
-    type Response = Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>;
+    type Response = Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>>;
 
     fn send<R: Into<DnsRequest>>(&mut self, request: R) -> Self::Response {
         let request = request.into();
-        let query = request.queries().first().expect("no query!").clone();
 
-        if let Some(rc_future) = self.active_queries.lock().expect("poisoned").get(&query) {
-            // FIXME check TTLs?
-            return Box::new(rc_future.clone());
-        }
-
-        // check if there are active queries
-        {
-            let map = self.active_queries.lock().expect("poisoned");
-            let request = map.get(&query);
-            if request.is_some() {
-                return Box::new(request.unwrap().clone());
-            }
-        }
-
-        let request = rc_future(self.client.send(request));
-        let mut map = self.active_queries.lock().expect("poisoned");
-        map.insert(query, request.clone());
-
-        Box::new(request)
+        Box::pin(Self::inner_send(
+            request,
+            Arc::clone(&self.active_queries),
+            self.client.clone(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod test {
-    use client::*;
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
+
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use futures::lock::Mutex;
     use futures::*;
-    use op::*;
-    use proto::error::ProtoError;
-    use proto::xfer::{DnsHandle, DnsRequest, DnsResponse};
-    use rr::*;
-    use std::cell::Cell;
+    use trust_dns_proto::{
+        error::ProtoError,
+        xfer::{DnsHandle, DnsRequest, DnsResponse},
+    };
+
+    use crate::client::*;
+    use crate::op::*;
+    use crate::rr::*;
 
     #[derive(Clone)]
     struct TestClient {
-        i: Cell<u16>,
+        i: Arc<Mutex<u16>>,
     }
 
     impl DnsHandle for TestClient {
-        type Response = Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>;
+        type Response = Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>>;
 
-        fn send<R: Into<DnsRequest>>(&mut self, _: R) -> Self::Response {
-            let mut message = Message::new();
-            let i = self.i.get();
+        fn send<R: Into<DnsRequest> + Send + 'static>(&mut self, request: R) -> Self::Response {
+            let i = Arc::clone(&self.i);
+            let future = async {
+                let i = i;
+                let request = request;
+                let mut message = Message::new();
 
-            message.set_id(i);
-            self.i.set(i + 1);
+                let mut i = i.lock().await;
 
-            Box::new(finished(message.into()))
+                message.set_id(*i);
+                println!(
+                    "sending {}: {}",
+                    *i,
+                    request.into().queries().first().expect("no query!").clone()
+                );
+
+                *i += 1;
+
+                Ok(message.into())
+            };
+
+            Box::pin(future)
         }
     }
 
     #[test]
     fn test_memoized() {
-        let mut client = MemoizeClientHandle::new(TestClient { i: Cell::new(0) });
+        use futures::executor::block_on;
+
+        let mut client = MemoizeClientHandle::new(TestClient {
+            i: Arc::new(Mutex::new(0)),
+        });
 
         let mut test1 = Message::new();
         test1.add_query(Query::new().set_query_type(RecordType::A).clone());
@@ -112,18 +151,17 @@ mod test {
         let mut test2 = Message::new();
         test2.add_query(Query::new().set_query_type(RecordType::AAAA).clone());
 
-        let result = client.send(test1.clone()).wait().ok().unwrap();
+        let result = block_on(client.send(test1.clone())).ok().unwrap();
         assert_eq!(result.id(), 0);
 
-        let result = client.send(test2.clone()).wait().ok().unwrap();
+        let result = block_on(client.send(test2.clone())).ok().unwrap();
         assert_eq!(result.id(), 1);
 
         // should get the same result for each...
-        let result = client.send(test1).wait().ok().unwrap();
+        let result = block_on(client.send(test1)).ok().unwrap();
         assert_eq!(result.id(), 0);
 
-        let result = client.send(test2).wait().ok().unwrap();
+        let result = block_on(client.send(test2)).ok().unwrap();
         assert_eq!(result.id(), 1);
     }
-
 }

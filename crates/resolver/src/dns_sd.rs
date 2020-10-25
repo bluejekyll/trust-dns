@@ -10,16 +10,20 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use futures::{Async, Future, Poll};
+use futures_util::future::Future;
 
 use proto::rr::rdata::TXT;
-use proto::rr::{IntoName, Name, RecordType};
+use proto::rr::{Name, RecordType};
 use proto::xfer::DnsRequestOptions;
+use proto::DnsHandle;
 
-use async_resolver::{AsyncResolver, BackgroundLookup};
-use error::*;
-use lookup::{ReverseLookup, ReverseLookupFuture, ReverseLookupIter, TxtLookup, TxtLookupFuture};
+use crate::error::*;
+use crate::lookup::{ReverseLookup, ReverseLookupIter, TxtLookup};
+use crate::name_server::ConnectionProvider;
+use crate::AsyncResolver;
 
 /// An extension for the Resolver to perform DNS Service Discovery
 pub trait DnsSdHandle {
@@ -28,49 +32,51 @@ pub trait DnsSdHandle {
     /// https://tools.ietf.org/html/rfc6763#section-4.1
     ///
     /// For registered service types, see: https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml
-    fn list_services<N: IntoName>(&self, name: N) -> ListServicesFuture;
+    fn list_services(&self, name: Name) -> ListServicesFuture;
 
     /// Retrieve service information
     ///
     /// https://tools.ietf.org/html/rfc6763#section-6
-    fn service_info<N: IntoName>(&self, name: N) -> ServiceInfoFuture;
+    fn service_info(&self, name: Name) -> ServiceInfoFuture;
 }
 
-impl DnsSdHandle for AsyncResolver {
-    fn list_services<N: IntoName>(&self, name: N) -> ListServicesFuture {
-        let options = DnsRequestOptions {
-            expects_multiple_responses: true,
+impl<C: DnsHandle, P: ConnectionProvider<Conn = C>> DnsSdHandle for AsyncResolver<C, P> {
+    fn list_services(&self, name: Name) -> ListServicesFuture {
+        let this = self.clone();
+
+        let ptr_future = async move {
+            let options = DnsRequestOptions {
+                expects_multiple_responses: true,
+            };
+
+            this.inner_lookup(name, RecordType::PTR, options).await
         };
 
-        let name: Name = match name.into_name() {
-            Ok(name) => name,
-            Err(err) => return ListServicesFuture(err.into()),
-        };
-
-        let ptr_future: BackgroundLookup<ReverseLookupFuture> =
-            self.inner_lookup(name, RecordType::PTR, options);
-
-        ListServicesFuture(ptr_future)
+        ListServicesFuture(Box::pin(ptr_future))
     }
 
-    fn service_info<N: IntoName>(&self, name: N) -> ServiceInfoFuture {
-        let txt_future = self.txt_lookup(name);
-        ServiceInfoFuture(txt_future)
+    fn service_info(&self, name: Name) -> ServiceInfoFuture {
+        let this = self.clone();
+
+        let ptr_future = async move { this.txt_lookup(name).await };
+
+        ServiceInfoFuture(Box::pin(ptr_future))
     }
 }
 
 /// A DNS Service Discovery future of Services discovered through the list operation
-pub struct ListServicesFuture(BackgroundLookup<ReverseLookupFuture>);
+pub struct ListServicesFuture(
+    Pin<Box<dyn Future<Output = Result<ReverseLookup, ResolveError>> + Send + 'static>>,
+);
 
 impl Future for ListServicesFuture {
-    type Item = ListServices;
-    type Error = ResolveError;
+    type Output = Result<ListServices, ResolveError>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.0.poll() {
-            Ok(Async::Ready(lookup)) => Ok(Async::Ready(ListServices(lookup))),
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(e) => Err(e),
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        match self.0.as_mut().poll(cx) {
+            Poll::Ready(Ok(lookup)) => Poll::Ready(Ok(ListServices(lookup))),
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
         }
     }
 }
@@ -99,17 +105,18 @@ impl<'i> Iterator for ListServicesIter<'i> {
 }
 
 /// A Future that resolves to the TXT information for a service
-pub struct ServiceInfoFuture(BackgroundLookup<TxtLookupFuture>);
+pub struct ServiceInfoFuture(
+    Pin<Box<dyn Future<Output = Result<TxtLookup, ResolveError>> + Send + 'static>>,
+);
 
 impl Future for ServiceInfoFuture {
-    type Item = ServiceInfo;
-    type Error = ResolveError;
+    type Output = Result<ServiceInfo, ResolveError>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.0.poll() {
-            Ok(Async::Ready(lookup)) => Ok(Async::Ready(ServiceInfo(lookup))),
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(e) => Err(e),
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        match self.0.as_mut().poll(cx) {
+            Poll::Ready(Ok(lookup)) => Poll::Ready(Ok(ServiceInfo(lookup))),
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
         }
     }
 }
@@ -143,9 +150,13 @@ impl ServiceInfo {
 
 #[cfg(test)]
 mod tests {
-    use tokio::runtime::current_thread::Runtime;
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
 
-    use config::*;
+    use std::str::FromStr;
+    use tokio::runtime::Runtime;
+
+    use crate::config::*;
+    use crate::TokioAsyncResolver;
 
     use super::*;
 
@@ -153,24 +164,24 @@ mod tests {
     #[ignore]
     fn test_list_services() {
         let mut io_loop = Runtime::new().unwrap();
-        let (resolver, bg) = AsyncResolver::new(
+        let resolver = TokioAsyncResolver::new(
             ResolverConfig::default(),
             ResolverOpts {
                 ip_strategy: LookupIpStrategy::Ipv6thenIpv4,
                 ..ResolverOpts::default()
             },
-        );
-
-        io_loop.spawn(bg);
+            io_loop.handle().clone(),
+        )
+        .expect("failed to create resolver");
 
         let response = io_loop
-            .block_on(resolver.list_services("_http._tcp.local."))
+            .block_on(resolver.list_services(Name::from_str("_http._tcp.local.").unwrap()))
             .expect("failed to run lookup");
 
         for name in response.iter() {
             println!("service: {}", name);
             let srvs = io_loop
-                .block_on(resolver.lookup_srv(name.clone()))
+                .block_on(resolver.srv_lookup(name.clone()))
                 .expect("failed to lookup name");
 
             for srv in srvs.iter() {

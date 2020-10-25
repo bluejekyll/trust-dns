@@ -20,6 +20,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc as Rc;
 
 use idna;
+use log::debug;
 
 use crate::error::*;
 
@@ -356,6 +357,8 @@ impl IntoLabel for Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
+
     use super::*;
 
     #[test]

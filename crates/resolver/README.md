@@ -2,7 +2,7 @@
 
 Trust-DNS Resolver is a library which implements the DNS resolver using the Trust-DNS Proto library.
 
-This library contains implementations for IPv4 (A) and IPv6 (AAAA) resolution, more features are in the works. It is built on top of the [tokio](https://tokio.rs) async-io project, this allows it to be integrated into other systems using the tokio and futures libraries. The Trust-DNS [project](https://github.com/bluejekyll/trust-dns) contains other libraries for DNS: a [client library](https://crates.io/crates/trust-dns) for raw protocol usage, a [server library](https://crates.io/crates/trust-dns-server) for hosting zones, and variations on the TLS implementation over [rustls](https://crates.io/crates/trust-dns-rustls) and [native-tls](https://crates.io/crates/trust-dns-native-tls).
+This library contains implementations for IPv4 (A) and IPv6 (AAAA) resolution, more features are in the works. It is built on top of the [tokio](https://tokio.rs) async-io project, this allows it to be integrated into other systems using the tokio and futures libraries. The Trust-DNS [project](https://github.com/bluejekyll/trust-dns) contains other libraries for DNS: a [client library](https://crates.io/crates/trust-dns-client) for raw protocol usage, a [server library](https://crates.io/crates/trust-dns-server) for hosting zones, and variations on the TLS implementation over [rustls](https://crates.io/crates/trust-dns-rustls) and [native-tls](https://crates.io/crates/trust-dns-native-tls).
 
 ## Features
 
@@ -16,7 +16,7 @@ This library contains implementations for IPv4 (A) and IPv6 (AAAA) resolution, m
 - CNAME chain resolution
 - *experimental* mDNS support (enable with `mdns` feature)
 - DNS over TLS (utilizing `native-tls`, `rustls`, and `openssl`; `native-tls` or `rustls` are recommended)
-- *experimental* DNS over HTTPS (currently only supports `rustls`)
+- DNS over HTTPS (currently only supports `rustls`)
 
 ## Example
 
@@ -36,7 +36,7 @@ let mut response = resolver.lookup_ip("www.example.com.").unwrap();
 
 // There can be many addresses associated with the name,
 //  this can return IPv4 and/or IPv6 addresses
-let address = response.next().expect("no addresses returned!");
+let address = response.iter().next().expect("no addresses returned!");
 if address.is_ipv4() {
     assert_eq!(address, IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)));
 } else {
@@ -44,13 +44,13 @@ if address.is_ipv4() {
 }
 ```
 
-## Enabling DNS-over-TLS and DNS-over-HTTPS
+## DNS-over-TLS and DNS-over-HTTPS
 
-**DNS-over-TLS**, DoT, the underlying implementations have been available as addon libraries to the Client and Server, but the configuration is experimental in Trust-DNS Resolver. *WARNING* The author makes no claims on the security and/or privacy guarantees of this implementation.
+DoT and DoH are supported. This is accomplished through the use of one of `native-tls`, `openssl`, or `rustls` (only `rustls` is currently supported for DoH). The Resolver requires only requires valid DoT or DoH resolvers being registered in order to be used.
 
-To use you must compile in support with one of the `dns-over-tls` features. There are three: `dns-over-openssl`, `dns-over-native-tls`, and `dns-over-rustls`. The reason for each is to make the Trust-DNS libraries flexible for different deployments, and/or security concerns. The easiest to use will generally be `dns-over-rustls` which utilizes the native Rust library (a rework of the `boringssl` project), this should compile and be usable on most ARM and x86 platforms. `dns-over-native-tls` will utilize the hosts TLS implementation where available or fallback to `openssl` where not. `dns-over-openssl` will specify that `openssl` should be used (which is a perfect fine option if required). If more than one is specified, the precedence will be in this order (i.e. only one can be used at a time) `dns-over-rustls`, `dns-over-native-tls`, and then `dns-over-openssl`. *NOTICE* the author is not responsible for any choice of library that does not meet security requirements.
+To use with the `Client`, the `TlsClientConnection` or `HttpsClientConnection` should be used. Similarly, to use with the tokio `AsyncClient` the `TlsClientStream` or `HttpsClientStream` should be used. ClientAuth, mTLS, is currently not supported, there are some issues still being worked on. TLS is useful for Server authentication and connection privacy.
 
-**DNS-over-HTTPS**, DoH, currently the only supported TLS library is `rustls`. To enable, us the feature `dns-over-https-rustls`.
+To enable DoT one of the features `dns-over-native-tls`, `dns-over-openssl`, or `dns-over-rustls` must be enabled, `dns-over-https-rustls` is used for DoH.
 
 ### Example
 
@@ -68,6 +68,20 @@ let mut resolver = Resolver::new(ResolverConfig::cloudflare_tls(), ResolverOpts:
 
 /// see example above...
 ```
+
+## DNSSec status
+
+Currently the root key is hardcoded into the system. This gives validation of
+ DNSKEY and DS records back to the root. NSEC is implemented, but not NSEC3.
+ Because caching is not yet enabled, it has been noticed that some DNS servers
+ appear to rate limit the connections, validating RRSIG records back to the root
+ can require a significant number of additional queries for those records.
+
+Zones will be automatically resigned on any record updates via dynamic DNS. To enable DNSSEC, one of the features `dnssec-openssl` or `dnssec-rustls` must be enabled.
+
+## Minimum Rust Version
+
+The current minimum rustc version for this project is `1.40`
 
 ## Versioning
 

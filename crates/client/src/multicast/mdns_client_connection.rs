@@ -10,17 +10,17 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use proto::multicast::{
-    MdnsClientConnect, MdnsClientStream, MdnsQueryType, MDNS_IPV4, MDNS_IPV6,
+use crate::proto::{
+    multicast::{MdnsClientConnect, MdnsClientStream, MdnsQueryType, MDNS_IPV4, MDNS_IPV6},
+    xfer::{DnsMultiplexer, DnsMultiplexerConnect, DnsRequestSender},
 };
-use proto::xfer::{DnsMultiplexer, DnsMultiplexerConnect, DnsRequestSender};
 
-use client::ClientConnection;
-use rr::dnssec::Signer;
+use crate::client::ClientConnection;
+use crate::rr::dnssec::Signer;
 
 /// MDNS based DNS Client connection
 ///
-/// Use with `trust_dns::client::Client` impls
+/// Use with `trust_dns_client::client::Client` impls
 #[derive(Clone)]
 pub struct MdnsClientConnection {
     multicast_addr: SocketAddr,

@@ -2,31 +2,34 @@
 #![cfg(feature = "trust-dns-resolver")]
 
 extern crate futures;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_server;
 
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
-use futures::future::Future;
+use tokio::runtime::Runtime;
 
-use trust_dns::rr::{Name, RecordType};
+use trust_dns_client::rr::{Name, RecordType};
 use trust_dns_server::authority::{Authority, LookupObject};
 use trust_dns_server::store::forwarder::ForwardAuthority;
 
 #[ignore]
 #[test]
 fn test_lookup() {
-    let forwarder = ForwardAuthority::new();
+    let mut runtime = Runtime::new().expect("failed to create Tokio Runtime");
+    let forwarder = ForwardAuthority::new(runtime.handle().clone());
+    let forwarder = runtime
+        .block_on(forwarder)
+        .expect("failed to create forwarder");
 
-    let lookup = forwarder
-        .lookup(
+    let lookup = runtime
+        .block_on(forwarder.lookup(
             &Name::from_str("www.example.com.").unwrap().into(),
             RecordType::A,
             false,
             Default::default(),
-        )
-        .wait()
+        ))
         .unwrap();
 
     let address = lookup.iter().next().expect("no addresses returned!");

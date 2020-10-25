@@ -239,7 +239,8 @@ pub enum Property {
 }
 
 impl Property {
-    fn as_str(&self) -> &str {
+    /// Convert to string form
+    pub fn as_str(&self) -> &str {
         match *self {
             Property::Issue => "issue",
             Property::IssueWild => "issuewild",
@@ -663,6 +664,16 @@ impl KeyValue {
             value: value.into(),
         }
     }
+
+    /// Gets a reference to the key of the pair.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Gets a reference to the value of the pair.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 /// Read the binary CAA format
@@ -837,6 +848,8 @@ pub fn emit(encoder: &mut BinEncoder, caa: &CAA) -> ProtoResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
+
     use super::*;
     use std::str;
 

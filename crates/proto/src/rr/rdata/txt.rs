@@ -53,7 +53,27 @@ impl TXT {
         TXT {
             txt_data: txt_data
                 .into_iter()
-                .map(|s| s.as_bytes().to_vec().into_boxed_slice())
+                .map(|s| s.into_bytes().into_boxed_slice())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    /// Creates a new TXT record data from bytes.
+    /// Allows creating binary record data.
+    ///
+    /// # Arguments
+    ///
+    /// * `txt_data` - the set of bytes which make up the txt_data.
+    ///
+    /// # Return value
+    ///
+    /// The new TXT record data.
+    pub fn from_bytes(txt_data: Vec<&[u8]>) -> TXT {
+        TXT {
+            txt_data: txt_data
+                .into_iter()
+                .map(|s| s.to_vec().into_boxed_slice())
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         }
@@ -78,9 +98,11 @@ pub fn read(decoder: &mut BinDecoder, rdata_length: Restrict<u16>) -> ProtoResul
     let mut strings = Vec::with_capacity(1);
 
     // no unsafe usage of rdata length after this point
-    let rdata_length = rdata_length.map(|u| u as usize).unverified(/*used as a higher bound, safely*/);
+    let rdata_length =
+        rdata_length.map(|u| u as usize).unverified(/*used as a higher bound, safely*/);
     while data_len - decoder.len() < rdata_length {
-        let string = decoder.read_character_data()?.unverified(/*any data should be validate in TXT usage*/);
+        let string =
+            decoder.read_character_data()?.unverified(/*any data should be validate in TXT usage*/);
         strings.push(string.to_vec().into_boxed_slice());
     }
     Ok(TXT {
@@ -97,22 +119,44 @@ pub fn emit(encoder: &mut BinEncoder, txt: &TXT) -> ProtoResult<()> {
     Ok(())
 }
 
-#[test]
-fn test() {
-    let rdata = TXT::new(vec!["Test me some".to_string(), "more please".to_string()]);
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
 
-    let mut bytes = Vec::new();
-    let mut encoder: BinEncoder = BinEncoder::new(&mut bytes);
-    assert!(emit(&mut encoder, &rdata).is_ok());
-    let bytes = encoder.into_bytes();
+    use super::*;
 
-    println!("bytes: {:?}", bytes);
+    #[test]
+    fn test() {
+        let rdata = TXT::new(vec!["Test me some".to_string(), "more please".to_string()]);
 
-    let mut decoder: BinDecoder = BinDecoder::new(bytes);
-    let read_rdata = read(&mut decoder, Restrict::new(bytes.len() as u16));
-    assert!(
-        read_rdata.is_ok(),
-        format!("error decoding: {:?}", read_rdata.unwrap_err())
-    );
-    assert_eq!(rdata, read_rdata.unwrap());
+        let mut bytes = Vec::new();
+        let mut encoder: BinEncoder = BinEncoder::new(&mut bytes);
+        assert!(emit(&mut encoder, &rdata).is_ok());
+        let bytes = encoder.into_bytes();
+
+        println!("bytes: {:?}", bytes);
+
+        let mut decoder: BinDecoder = BinDecoder::new(bytes);
+        let restrict = Restrict::new(bytes.len() as u16);
+        let read_rdata = read(&mut decoder, restrict).expect("Decoding error");
+        assert_eq!(rdata, read_rdata);
+    }
+
+    #[test]
+    fn publish_binary_txt_record() {
+        let bin_data = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let rdata = TXT::from_bytes(vec![b"Test me some", &bin_data]);
+
+        let mut bytes = Vec::new();
+        let mut encoder: BinEncoder = BinEncoder::new(&mut bytes);
+        assert!(emit(&mut encoder, &rdata).is_ok());
+        let bytes = encoder.into_bytes();
+
+        println!("bytes: {:?}", bytes);
+
+        let mut decoder: BinDecoder = BinDecoder::new(bytes);
+        let restrict = Restrict::new(bytes.len() as u16);
+        let read_rdata = read(&mut decoder, restrict).expect("Decoding error");
+        assert_eq!(rdata, read_rdata);
+    }
 }

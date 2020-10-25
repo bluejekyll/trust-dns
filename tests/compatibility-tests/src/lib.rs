@@ -29,7 +29,7 @@ mod none;
 #[cfg(feature = "bind")]
 pub use bind::named_process;
 
-#[cfg(all(feature = "none", not(feature = "bind")))]
+#[cfg(not(feature = "bind"))]
 pub use none::named_process;
 
 fn find_test_port() -> u16 {
@@ -59,8 +59,7 @@ impl Drop for NamedProcess {
 }
 
 fn new_working_dir() -> String {
-    let server_path =
-        env::var("TDNS_SERVER_SRC_ROOT").unwrap_or_else(|_| "../../crates/server".to_owned());
+    let target_dir = env::var("TARGET_DIR").expect("TARGET_DIR not set");
 
     let rand = rand::random::<u32>();
     let rand = BASE32.encode(&[
@@ -69,7 +68,7 @@ fn new_working_dir() -> String {
         (rand >> 16) as u8,
         (rand >> 24) as u8,
     ]);
-    let working_dir = format!("{}/../../target/bind_pwd_{}", server_path, rand);
+    let working_dir = format!("{}/bind_pwd_{}", target_dir, rand);
 
     if !Path::new(&working_dir).exists() {
         DirBuilder::new()
@@ -126,7 +125,8 @@ where
                 // stdout().write(b"SRV: ").unwrap();
                 // stdout().write(output.as_bytes()).unwrap();
             }
-        }).expect("no thread available");
+        })
+        .expect("no thread available");
 
     // return handle to child process
     NamedProcess {

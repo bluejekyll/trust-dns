@@ -2,35 +2,30 @@ extern crate futures;
 extern crate openssl;
 extern crate rustls;
 extern crate tokio;
-extern crate tokio_tcp;
-extern crate tokio_timer;
-extern crate tokio_udp;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_integration;
 extern crate trust_dns_openssl;
 extern crate trust_dns_proto;
 extern crate trust_dns_rustls;
 extern crate trust_dns_server;
 
-use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use futures::{future, Future};
-use tokio::runtime::current_thread::Runtime;
-use tokio_tcp::TcpListener;
-use tokio_timer::Delay;
-use tokio_udp::UdpSocket;
+use futures::{future, Future, FutureExt};
+use tokio::net::TcpListener;
+use tokio::net::UdpSocket;
+use tokio::runtime::Runtime;
 
-use trust_dns::client::*;
-use trust_dns::op::*;
-use trust_dns::rr::*;
-use trust_dns::tcp::TcpClientConnection;
-use trust_dns::udp::UdpClientConnection;
+use trust_dns_client::client::*;
+use trust_dns_client::op::*;
+use trust_dns_client::rr::*;
+use trust_dns_client::tcp::TcpClientConnection;
+use trust_dns_client::udp::UdpClientConnection;
 use trust_dns_proto::error::ProtoError;
 use trust_dns_proto::xfer::DnsRequestSender;
 
@@ -44,8 +39,9 @@ use trust_dns_integration::tls_client_connection::TlsClientConnection;
 
 #[test]
 fn test_server_www_udp() {
+    let mut runtime = Runtime::new().expect("failed to create Tokio Runtime");
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    let udp_socket = UdpSocket::bind(&addr).unwrap();
+    let udp_socket = runtime.block_on(UdpSocket::bind(&addr)).unwrap();
 
     let ipaddr = udp_socket.local_addr().unwrap();
     println!("udp_socket on port: {}", ipaddr);
@@ -54,7 +50,7 @@ fn test_server_www_udp() {
 
     let server_thread = thread::Builder::new()
         .name("test_server:udp:server".to_string())
-        .spawn(move || server_thread_udp(udp_socket, server_continue2))
+        .spawn(move || server_thread_udp(runtime, udp_socket, server_continue2))
         .unwrap();
 
     let client_thread = thread::Builder::new()
@@ -66,13 +62,14 @@ fn test_server_www_udp() {
 
     assert!(client_result.is_ok(), "client failed: {:?}", client_result);
     server_continue.store(false, Ordering::Relaxed);
-    server_thread.join().unwrap();;
+    server_thread.join().unwrap();
 }
 
 #[test]
 fn test_server_www_tcp() {
+    let mut runtime = Runtime::new().expect("failed to create Tokio Runtime");
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    let tcp_listener = TcpListener::bind(&addr).unwrap();
+    let tcp_listener = runtime.block_on(TcpListener::bind(&addr)).unwrap();
 
     let ipaddr = tcp_listener.local_addr().unwrap();
     println!("tcp_listner on port: {}", ipaddr);
@@ -81,7 +78,7 @@ fn test_server_www_tcp() {
 
     let server_thread = thread::Builder::new()
         .name("test_server:tcp:server".to_string())
-        .spawn(move || server_thread_tcp(tcp_listener, server_continue2))
+        .spawn(move || server_thread_tcp(runtime, tcp_listener, server_continue2))
         .unwrap();
 
     let client_thread = thread::Builder::new()
@@ -93,13 +90,14 @@ fn test_server_www_tcp() {
 
     assert!(client_result.is_ok(), "client failed: {:?}", client_result);
     server_continue.store(false, Ordering::Relaxed);
-    server_thread.join().unwrap();;
+    server_thread.join().unwrap();
 }
 
 #[test]
 fn test_server_unknown_type() {
+    let mut runtime = Runtime::new().expect("failed to create Tokio Runtime");
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    let udp_socket = UdpSocket::bind(&addr).unwrap();
+    let udp_socket = runtime.block_on(UdpSocket::bind(&addr)).unwrap();
 
     let ipaddr = udp_socket.local_addr().unwrap();
     println!("udp_socket on port: {}", ipaddr);
@@ -108,7 +106,7 @@ fn test_server_unknown_type() {
 
     let server_thread = thread::Builder::new()
         .name("test_server:udp:server".to_string())
-        .spawn(move || server_thread_udp(udp_socket, server_continue2))
+        .spawn(move || server_thread_udp(runtime, udp_socket, server_continue2))
         .unwrap();
 
     let conn = UdpClientConnection::new(ipaddr).unwrap();
@@ -139,7 +137,7 @@ fn test_server_unknown_type() {
     );
 
     server_continue.store(false, Ordering::Relaxed);
-    server_thread.join().unwrap();;
+    server_thread.join().unwrap();
 }
 
 #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
@@ -164,16 +162,17 @@ fn test_server_www_tls() {
 
     let dns_name = "ns.example.com";
 
-    let server_path = env::var("TDNS_SERVER_SRC_ROOT").unwrap_or("../../crates/server".to_owned());
+    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or("../..".to_owned());
     println!("using server src path: {}", server_path);
 
-    let cert_der = read_file(&format!("{}/../../tests/test-data/ca.der", server_path));
+    let cert_der = read_file(&format!("{}/tests/test-data/ca.der", server_path));
 
-    let pkcs12_der = read_file(&format!("{}/../../tests/test-data/cert.p12", server_path));
+    let pkcs12_der = read_file(&format!("{}/tests/test-data/cert.p12", server_path));
 
     // Server address
+    let mut runtime = Runtime::new().expect("failed to create Tokio Runtime");
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    let tcp_listener = TcpListener::bind(&addr).unwrap();
+    let tcp_listener = runtime.block_on(TcpListener::bind(&addr)).unwrap();
 
     let ipaddr = tcp_listener.local_addr().unwrap();
     println!("tcp_listner on port: {}", ipaddr);
@@ -182,7 +181,7 @@ fn test_server_www_tls() {
 
     let server_thread = thread::Builder::new()
         .name("test_server:tls:server".to_string())
-        .spawn(move || server_thread_tls(tcp_listener, server_continue2, pkcs12_der))
+        .spawn(move || server_thread_tls(tcp_listener, server_continue2, pkcs12_der, runtime))
         .unwrap();
 
     let client_thread = thread::Builder::new()
@@ -222,8 +221,8 @@ fn lazy_tls_client(ipaddr: SocketAddr, dns_name: String, cert_der: Vec<u8>) -> T
 fn client_thread_www<C: ClientConnection>(conn: C)
 where
     C::Sender: DnsRequestSender<DnsResponseFuture = C::Response>,
-    C::Response: Future<Item = DnsResponse, Error = ProtoError> + 'static + Send,
-    C::SenderFuture: Future<Item = C::Sender, Error = ProtoError> + 'static + Send,
+    C::Response: Future<Output = Result<DnsResponse, ProtoError>> + 'static + Send,
+    C::SenderFuture: Future<Output = Result<C::Sender, ProtoError>> + 'static + Send,
 {
     let name = Name::from_str("www.example.com").unwrap();
     let client = SyncClient::new(conn);
@@ -274,74 +273,75 @@ fn new_catalog() -> Catalog {
     catalog
 }
 
-fn server_thread_udp(udp_socket: UdpSocket, server_continue: Arc<AtomicBool>) {
+fn server_thread_udp(
+    mut io_loop: Runtime,
+    udp_socket: UdpSocket,
+    server_continue: Arc<AtomicBool>,
+) {
     let catalog = new_catalog();
 
-    let mut io_loop = Runtime::new().unwrap();
-    let server = ServerFuture::new(catalog);
+    let mut server = ServerFuture::new(catalog);
+
     io_loop
-        .block_on::<Box<dyn Future<Item = (), Error = ()> + Send>>(Box::new(future::lazy(|| {
-            server.register_socket(udp_socket);
-            future::ok(())
-        })))
-        .unwrap();
+        .handle()
+        .enter(|| server.register_socket(udp_socket));
 
     while server_continue.load(Ordering::Relaxed) {
-        io_loop
-            .block_on(Delay::new(Instant::now() + Duration::from_millis(10)))
-            .unwrap();
+        io_loop.block_on(
+            future::lazy(|_| tokio::time::delay_for(Duration::from_millis(10))).flatten(),
+        );
+    }
+
+    drop(io_loop);
+}
+
+fn server_thread_tcp(
+    mut io_loop: Runtime,
+    tcp_listener: TcpListener,
+    server_continue: Arc<AtomicBool>,
+) {
+    let catalog = new_catalog();
+    let mut server = ServerFuture::new(catalog);
+
+    io_loop.handle().enter(|| {
+        server
+            .register_listener(tcp_listener, Duration::from_secs(30))
+            .expect("failed to register tcp")
+    });
+
+    while server_continue.load(Ordering::Relaxed) {
+        io_loop.block_on(
+            future::lazy(|_| tokio::time::delay_for(Duration::from_millis(10))).flatten(),
+        );
     }
 }
 
-fn server_thread_tcp(tcp_listener: TcpListener, server_continue: Arc<AtomicBool>) {
-    let catalog = new_catalog();
-    let mut io_loop = Runtime::new().unwrap();
-    let server = ServerFuture::new(catalog);
-    io_loop
-        .block_on::<Box<dyn Future<Item = (), Error = io::Error> + Send>>(Box::new(future::lazy(
-            || future::result(server.register_listener(tcp_listener, Duration::from_secs(30))),
-        )))
-        .expect("tcp registration failed");
-
-    while server_continue.load(Ordering::Relaxed) {
-        io_loop
-            .block_on(Delay::new(Instant::now() + Duration::from_millis(10)))
-            .unwrap();
-    }
-}
-
-// FIXME: need a rustls option
+// TODO: need a rustls option
 #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
 fn server_thread_tls(
     tls_listener: TcpListener,
     server_continue: Arc<AtomicBool>,
     pkcs12_der: Vec<u8>,
+    mut io_loop: Runtime,
 ) {
     use openssl::pkcs12::Pkcs12;
 
     let catalog = new_catalog();
-    let mut io_loop = Runtime::new().unwrap();
-    let server = ServerFuture::new(catalog);
-    io_loop
-        .block_on::<Box<Future<Item = (), Error = io::Error> + Send>>(Box::new(future::lazy(
-            || {
-                let pkcs12 = Pkcs12::from_der(&pkcs12_der)
-                    .expect("bad pkcs12 der")
-                    .parse("mypass")
-                    .expect("Pkcs12::from_der");
-                let pkcs12 = ((pkcs12.cert, pkcs12.chain), pkcs12.pkey);
-                future::result(server.register_tls_listener(
-                    tls_listener,
-                    Duration::from_secs(30),
-                    pkcs12,
-                ))
-            },
-        )))
-        .expect("tcp registration failed");
+    let mut server = ServerFuture::new(catalog);
+    let pkcs12 = Pkcs12::from_der(&pkcs12_der)
+        .expect("bad pkcs12 der")
+        .parse("mypass")
+        .expect("Pkcs12::from_der");
+    let pkcs12 = ((pkcs12.cert, pkcs12.chain), pkcs12.pkey);
+    io_loop.block_on(future::lazy(|_| {
+        server
+            .register_tls_listener(tls_listener, Duration::from_secs(30), pkcs12)
+            .expect("failed to register TLS")
+    }));
 
     while server_continue.load(Ordering::Relaxed) {
-        io_loop
-            .block_on(Delay::new(Instant::now() + Duration::from_millis(10)))
-            .unwrap();
+        io_loop.block_on(
+            future::lazy(|_| tokio::time::delay_for(Duration::from_millis(10))).flatten(),
+        );
     }
 }

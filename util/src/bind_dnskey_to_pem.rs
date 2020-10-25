@@ -5,28 +5,21 @@
 // http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
-extern crate clap;
-extern crate data_encoding;
-extern crate env_logger;
-#[macro_use]
-extern crate log;
-extern crate openssl;
-extern crate trust_dns;
-
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::str::FromStr;
 
 use clap::{App, Arg, ArgMatches};
 use data_encoding::BASE64;
+use log::info;
 use openssl::bn::BigNum;
 use openssl::rsa::Rsa;
 
-use trust_dns::rr::dnssec::Algorithm;
+use trust_dns_client::rr::dnssec::Algorithm;
 
 fn args<'a>() -> ArgMatches<'a> {
     App::new("Trust-DNS dnskey-to-pem")
-        .version(trust_dns::version())
+        .version(trust_dns_client::version())
         .author("Benjamin Fry <benjaminfry@me.com>")
         .about("Converts a dnskey, as generated from BIND's dnssec-keygen, into pem format")
         .arg(
@@ -35,7 +28,8 @@ fn args<'a>() -> ArgMatches<'a> {
                 .help("Input FILE from which to read the DNSSec private key")
                 .required(true)
                 .index(1),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("output")
                 .value_name("OUTPUT_FILE")
                 .long("output")
@@ -43,7 +37,8 @@ fn args<'a>() -> ArgMatches<'a> {
                 .takes_value(true)
                 .help("Output FILE to write to")
                 .default_value("out.pem"),
-        ).get_matches()
+        )
+        .get_matches()
 }
 
 pub fn main() {
@@ -85,7 +80,8 @@ pub fn main() {
             .split(' ')
             .next()
             .unwrap_or_else(|| panic!("bad algorithm format, expected '# STR': {}", next_line)),
-    ).unwrap_or_else(|_| panic!("bad algorithm format, expected '# STR': {}", next_line));
+    )
+    .unwrap_or_else(|_| panic!("bad algorithm format, expected '# STR': {}", next_line));
 
     let algorithm = match Algorithm::from_u8(algorithm_num) {
         Algorithm::Unknown(v) => panic!("unsupported algorithm {}: {}", v, next_line),
@@ -140,7 +136,8 @@ fn read_rsa<B: BufRead>(lines: Lines<B>) -> Vec<u8> {
                 &BASE64
                     .decode(value.as_bytes())
                     .unwrap_or_else(|_| panic!("badly formatted line, expected base64: {}", line)),
-            ).unwrap(),
+            )
+            .unwrap(),
         );
 
         match field {
@@ -165,7 +162,8 @@ fn read_rsa<B: BufRead>(lines: Lines<B>) -> Vec<u8> {
         exponent1.expect("Missing Exponent1"),
         exponent2.expect("Missing Exponent2"),
         coefficient.expect("Missing Coefficient"),
-    ).unwrap();
+    )
+    .unwrap();
 
     rsa.private_key_to_pem().unwrap()
 }

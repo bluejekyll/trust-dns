@@ -7,12 +7,13 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use dns_lru;
-use lookup::Lookup;
 use proto::op::Query;
 use proto::rr::{Name, RecordType};
 #[cfg(any(unix, windows))]
 use proto::rr::{RData, Record};
+
+use crate::dns_lru;
+use crate::lookup::Lookup;
 
 #[derive(Debug, Default)]
 struct LookupType {
@@ -188,8 +189,8 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn tests_dir() -> String {
-        let server_path = env::var("TDNS_SERVER_SRC_ROOT").unwrap_or_else(|_| ".".to_owned());
-        format! {"{}/../resolver/tests", server_path}
+        let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
+        format! {"{}/crates/resolver/tests", server_path}
     }
 
     #[test]
@@ -208,7 +209,7 @@ mod tests {
         assert_eq!(rdatas, vec![RData::A(Ipv4Addr::new(127, 0, 0, 1))]);
 
         let rdatas = hosts
-            .lookup_static_host(&Query::query(name.clone(), RecordType::AAAA))
+            .lookup_static_host(&Query::query(name, RecordType::AAAA))
             .unwrap()
             .iter()
             .map(ToOwned::to_owned)
@@ -221,7 +222,7 @@ mod tests {
 
         let name = Name::from_str("broadcasthost").unwrap();
         let rdatas = hosts
-            .lookup_static_host(&Query::query(name.clone(), RecordType::A))
+            .lookup_static_host(&Query::query(name, RecordType::A))
             .unwrap()
             .iter()
             .map(ToOwned::to_owned)
@@ -230,7 +231,7 @@ mod tests {
 
         let name = Name::from_str("example.com").unwrap();
         let rdatas = hosts
-            .lookup_static_host(&Query::query(name.clone(), RecordType::A))
+            .lookup_static_host(&Query::query(name, RecordType::A))
             .unwrap()
             .iter()
             .map(ToOwned::to_owned)
@@ -239,7 +240,7 @@ mod tests {
 
         let name = Name::from_str("a.example.com").unwrap();
         let rdatas = hosts
-            .lookup_static_host(&Query::query(name.clone(), RecordType::A))
+            .lookup_static_host(&Query::query(name, RecordType::A))
             .unwrap()
             .iter()
             .map(ToOwned::to_owned)
@@ -248,7 +249,7 @@ mod tests {
 
         let name = Name::from_str("b.example.com").unwrap();
         let rdatas = hosts
-            .lookup_static_host(&Query::query(name.clone(), RecordType::A))
+            .lookup_static_host(&Query::query(name, RecordType::A))
             .unwrap()
             .iter()
             .map(ToOwned::to_owned)

@@ -10,7 +10,7 @@ use proto::op::message::EmitAndCount;
 use proto::op::{message, Edns, Header, Message, MessageType, OpCode, ResponseCode};
 use proto::rr::Record;
 use proto::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
-use trust_dns::op::LowerQuery;
+use trust_dns_client::op::LowerQuery;
 
 /// A Message which captures the data from an inbound request
 #[derive(Debug, PartialEq)]
@@ -181,7 +181,7 @@ impl<'q> BinDecodable<'q> for MessageRequest {
     fn read(decoder: &mut BinDecoder<'q>) -> ProtoResult<Self> {
         let header = Header::read(decoder)?;
 
-        // TODO/FIXME: return just header, and in the case of the rest of message getting an error.
+        // TODO: return just header, and in the case of the rest of message getting an error.
         //  this could improve error detection while decoding.
 
         // get the questions

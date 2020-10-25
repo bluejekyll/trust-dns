@@ -9,7 +9,7 @@ extern crate chrono;
 extern crate env_logger;
 extern crate futures;
 extern crate openssl;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_compatibility;
 
 use std::env;
@@ -24,17 +24,17 @@ use chrono::Duration;
 use openssl::rsa::Rsa;
 
 #[cfg(not(feature = "none"))]
-use trust_dns::client::Client;
-use trust_dns::client::{ClientConnection, SyncClient};
+use trust_dns_client::client::Client;
+use trust_dns_client::client::{ClientConnection, SyncClient};
 #[cfg(not(feature = "none"))]
-use trust_dns::op::ResponseCode;
-use trust_dns::rr::dnssec::{Algorithm, KeyPair, Signer};
-use trust_dns::rr::rdata::key::{KeyUsage, KEY};
-use trust_dns::rr::Name;
+use trust_dns_client::op::ResponseCode;
+use trust_dns_client::rr::dnssec::{Algorithm, KeyPair, Signer};
+use trust_dns_client::rr::rdata::key::{KeyUsage, KEY};
+use trust_dns_client::rr::Name;
 #[cfg(not(feature = "none"))]
-use trust_dns::rr::{DNSClass, RData, Record, RecordType};
+use trust_dns_client::rr::{DNSClass, RData, Record, RecordType};
 #[cfg(not(feature = "none"))]
-use trust_dns::udp::UdpClientConnection;
+use trust_dns_client::udp::UdpClientConnection;
 #[cfg(not(feature = "none"))]
 use trust_dns_compatibility::named_process;
 
@@ -56,10 +56,10 @@ fn test_get() {
     assert_eq!(result.answers()[0].rr_type(), RecordType::A);
 
     let rdata = result.answers()[0].rdata();
-    if let &RData::A(address) = rdata {
-        assert_eq!(address, Ipv4Addr::new(127, 0, 0, 1));
+    if let RData::A(address) = rdata {
+        assert_eq!(address, &Ipv4Addr::new(127, 0, 0, 1));
     } else {
-        assert!(false);
+        panic!("RData::A wasn't here");
     }
 }
 
@@ -68,10 +68,9 @@ fn create_sig0_ready_client<CC>(conn: CC) -> SyncClient<CC>
 where
     CC: ClientConnection,
 {
-    let server_path =
-        env::var("TDNS_SERVER_SRC_ROOT").unwrap_or_else(|_| "../../crates/server".to_owned());
+    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
     let pem_path = format!(
-        "{}/../../tests/compatibility-tests/tests/conf/Kupdate.example.com.+008+56935.pem",
+        "{}/tests/compatibility-tests/tests/conf/Kupdate.example.com.+008+56935.pem",
         server_path
     );
     println!("loading pem from: {}", pem_path);
@@ -135,12 +134,10 @@ fn test_create() {
     assert_eq!(result.response_code(), ResponseCode::YXRRSet);
 
     // will fail if already set and not the same value.
-    let mut record = record.clone();
+    let mut record = record;
     record.set_rdata(RData::A(Ipv4Addr::new(101, 11, 101, 11)));
 
-    let result = client
-        .create(record.clone(), origin.clone())
-        .expect("create failed");
+    let result = client.create(record, origin).expect("create failed");
     assert_eq!(result.response_code(), ResponseCode::YXRRSet);
 }
 

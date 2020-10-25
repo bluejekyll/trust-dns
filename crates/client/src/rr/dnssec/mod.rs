@@ -21,27 +21,27 @@ mod key_format;
 mod keypair;
 mod signer;
 
-use proto::rr::dnssec;
+use crate::proto::rr::dnssec;
 
+pub use self::dnssec::tbs;
 pub use self::dnssec::Algorithm;
 pub use self::dnssec::DigestType;
-#[cfg(any(feature = "openssl", feature = "ring"))]
-pub use self::key_format::KeyFormat;
-pub use self::keypair::KeyPair;
 pub use self::dnssec::Nsec3HashAlgorithm;
 pub use self::dnssec::PublicKey;
 pub use self::dnssec::PublicKeyBuf;
 pub use self::dnssec::PublicKeyEnum;
-pub use self::signer::Signer;
 pub use self::dnssec::SupportedAlgorithms;
 pub use self::dnssec::TrustAnchor;
-pub use self::dnssec::tbs;
-pub use self::dnssec::TBS;
 pub use self::dnssec::Verifier;
+pub use self::dnssec::TBS;
+#[cfg(any(feature = "openssl", feature = "ring"))]
+pub use self::key_format::KeyFormat;
+pub use self::keypair::KeyPair;
+pub use self::signer::Signer;
 
-pub use error::DnsSecError;
-pub use error::DnsSecErrorKind;
-pub use error::DnsSecResult;
+pub use crate::error::DnsSecError;
+pub use crate::error::DnsSecErrorKind;
+pub use crate::error::DnsSecResult;
 
 #[cfg(all(not(feature = "ring"), feature = "openssl"))]
 pub use openssl::hash::DigestBytes as Digest;
@@ -63,15 +63,15 @@ mod faux_key_type {
     /// A key that contains private key material
     pub trait HasPrivate {}
 
-    impl <K: HasPrivate> HasPublic for K {}
+    impl<K: HasPrivate> HasPublic for K {}
 
     /// Faux implementation of the Openssl Public key types
-    pub enum Public{}
+    pub enum Public {}
 
     impl HasPublic for Public {}
 
     /// Faux implementation of the Openssl Public key types
-    pub enum Private{}
+    pub enum Private {}
 
     impl HasPrivate for Private {}
 }

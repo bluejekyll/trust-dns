@@ -20,6 +20,8 @@ use std::convert::From;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
+use log::warn;
+
 use crate::error::*;
 use crate::rr::dnssec::Algorithm;
 use crate::serialize::binary::{BinEncodable, BinEncoder};
@@ -87,7 +89,7 @@ impl SupportedAlgorithms {
 
     /// Set the specified algorithm as supported
     pub fn set(&mut self, algorithm: Algorithm) {
-        if let Some(bit_pos) = Self::pos(algorithm) { 
+        if let Some(bit_pos) = Self::pos(algorithm) {
             self.bit_map |= bit_pos;
         }
     }
@@ -96,7 +98,7 @@ impl SupportedAlgorithms {
     pub fn has(self, algorithm: Algorithm) -> bool {
         if let Some(bit_pos) = Self::pos(algorithm) {
             (bit_pos & self.bit_map) == bit_pos
-        } else { 
+        } else {
             false
         }
     }
@@ -140,7 +142,7 @@ impl<'a> From<&'a [u8]> for SupportedAlgorithms {
         let mut supported = SupportedAlgorithms::new();
 
         for a in values.iter().map(|i| Algorithm::from_u8(*i)) {
-            match a { 
+            match a {
                 Algorithm::Unknown(v) => warn!("unrecognized algorithm: {}", v),
                 a => supported.set(a),
             }

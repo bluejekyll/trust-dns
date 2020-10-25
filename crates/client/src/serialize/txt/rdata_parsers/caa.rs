@@ -16,11 +16,13 @@
 
 //! mail exchange, email, record
 
-use proto::rr::rdata::caa;
-use proto::rr::rdata::caa::{Property, Value};
+use log::warn;
 
-use error::*;
-use rr::rdata::CAA;
+use crate::proto::rr::rdata::caa;
+use crate::proto::rr::rdata::caa::{Property, Value};
+
+use crate::error::*;
+use crate::rr::rdata::CAA;
 
 /// Parse the RData from a set of Tokens
 ///
@@ -44,15 +46,15 @@ use rr::rdata::CAA;
 ///       specified in [RFC1035], Section 5.1.
 /// ```
 pub fn parse<'i, I: Iterator<Item = &'i str>>(mut tokens: I) -> ParseResult<CAA> {
-    let flags_str: &str = tokens.next().ok_or_else(|| {
-        ParseError::from(ParseErrorKind::Message("caa flags not present"))
-    })?;
-    let tag_str: &str = tokens.next().ok_or_else(|| {
-        ParseError::from(ParseErrorKind::Message("caa tag not present"))
-    })?;
-    let value_str: &str = tokens.next().ok_or_else(|| {
-        ParseError::from(ParseErrorKind::Message("caa value not present"))
-    })?;
+    let flags_str: &str = tokens
+        .next()
+        .ok_or_else(|| ParseError::from(ParseErrorKind::Message("caa flags not present")))?;
+    let tag_str: &str = tokens
+        .next()
+        .ok_or_else(|| ParseError::from(ParseErrorKind::Message("caa tag not present")))?;
+    let value_str: &str = tokens
+        .next()
+        .ok_or_else(|| ParseError::from(ParseErrorKind::Message("caa value not present")))?;
 
     // parse the flags
     let issuer_critical = {

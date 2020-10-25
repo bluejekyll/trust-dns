@@ -1,22 +1,24 @@
 extern crate futures;
 extern crate tokio;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_integration;
 extern crate trust_dns_proto;
 extern crate trust_dns_resolver;
 
 use std::net::*;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicIsize, Ordering},
     Arc,
 };
+use std::task::Poll;
 
-use futures::future::{self, Future, Loop};
-use tokio::runtime::current_thread::Runtime;
+use futures::executor::block_on;
+use futures::{future, Future};
 
-use trust_dns::op::Query;
-use trust_dns::rr::{Name, RecordType};
+use trust_dns_client::op::Query;
+use trust_dns_client::rr::{Name, RecordType};
 use trust_dns_integration::mock_client::*;
 use trust_dns_proto::error::{ProtoError, ProtoResult};
 use trust_dns_proto::xfer::{DnsHandle, DnsResponse};
@@ -36,11 +38,14 @@ impl Default for MockConnProvider<DefaultOnSend> {
     }
 }
 
-impl<O: OnSend> ConnectionProvider for MockConnProvider<O> {
-    type ConnHandle = MockClientHandle<O>;
+#[allow(clippy::type_complexity)]
+impl<O: OnSend + Unpin> ConnectionProvider for MockConnProvider<O> {
+    type Conn = MockClientHandle<O>;
+    type FutureConn = future::Ready<Result<Self::Conn, ProtoError>>;
 
-    fn new_connection(&self, _: &NameServerConfig, _: &ResolverOpts) -> Self::ConnHandle {
-        MockClientHandle::mock_on_send(vec![], self.on_send.clone())
+    fn new_connection(&self, _: &NameServerConfig, _: &ResolverOpts) -> Self::FutureConn {
+        println!("MockClient::new_connection");
+        future::ok(MockClientHandle::mock_on_send(vec![], self.on_send.clone()))
     }
 }
 
@@ -56,7 +61,7 @@ fn mock_nameserver(
 }
 
 #[cfg(test)]
-fn mock_nameserver_on_send<O: OnSend>(
+fn mock_nameserver_on_send<O: OnSend + Unpin>(
     messages: Vec<ProtoResult<DnsResponse>>,
     options: ResolverOpts,
     on_send: O,
@@ -71,6 +76,8 @@ fn mock_nameserver_on_send<O: OnSend>(
             socket_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 0),
             protocol: Protocol::Udp,
             tls_dns_name: None,
+            #[cfg(any(feature = "dns-over-rustls", feature = "dns-over-https-rustls"))]
+            tls_config: None,
         },
         options,
         client,
@@ -89,7 +96,8 @@ fn mock_nameserver_pool(
 }
 
 #[cfg(test)]
-fn mock_nameserver_pool_on_send<O: OnSend>(
+#[allow(clippy::redundant_clone)]
+fn mock_nameserver_pool_on_send<O: OnSend + Unpin>(
     udp: Vec<MockedNameServer<O>>,
     tcp: Vec<MockedNameServer<O>>,
     _mdns: Option<MockedNameServer<O>>,
@@ -108,7 +116,7 @@ fn mock_nameserver_pool_on_send<O: OnSend>(
         &options,
         udp,
         tcp,
-        _mdns.unwrap_or_else(|| mock_nameserver_on_send(vec![], options, on_send)),
+        _mdns.unwrap_or_else(move || mock_nameserver_on_send(vec![], options, on_send)),
         conn_provider,
     );
 }
@@ -122,9 +130,6 @@ fn test_datagram() {
 
     let udp_message = message(query.clone(), vec![udp_record.clone()], vec![], vec![]);
     let tcp_message = message(query.clone(), vec![tcp_record], vec![], vec![]);
-
-    let mut reactor = Runtime::new().unwrap();
-
     let udp_nameserver = mock_nameserver(vec![udp_message.map(Into::into)], Default::default());
     let tcp_nameserver = mock_nameserver(vec![tcp_message.map(Into::into)], Default::default());
 
@@ -139,7 +144,7 @@ fn test_datagram() {
     let request = message(query, vec![], vec![], vec![]).unwrap();
     let future = pool.send(request);
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], udp_record);
 }
 
@@ -158,8 +163,6 @@ fn test_datagram_stream_upgrade() {
 
     let tcp_message = message(query.clone(), vec![tcp_record.clone()], vec![], vec![]);
 
-    let mut reactor = Runtime::new().unwrap();
-
     let udp_nameserver = mock_nameserver(vec![udp_message.map(Into::into)], Default::default());
     let tcp_nameserver = mock_nameserver(vec![tcp_message.map(Into::into)], Default::default());
 
@@ -174,7 +177,7 @@ fn test_datagram_stream_upgrade() {
     let request = message(query, vec![], vec![], vec![]).unwrap();
     let future = pool.send(request);
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], tcp_record);
 }
 
@@ -190,8 +193,6 @@ fn test_datagram_fails_to_stream() {
 
     let tcp_message = message(query.clone(), vec![tcp_record.clone()], vec![], vec![]);
 
-    let mut reactor = Runtime::new().unwrap();
-
     let udp_nameserver = mock_nameserver(vec![udp_message.map(Into::into)], Default::default());
     let tcp_nameserver = mock_nameserver(vec![tcp_message.map(Into::into)], Default::default());
 
@@ -206,7 +207,7 @@ fn test_datagram_fails_to_stream() {
     let request = message(query, vec![], vec![], vec![]).unwrap();
     let future = pool.send(request);
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], tcp_record);
 }
 
@@ -224,8 +225,6 @@ fn test_local_mdns() {
 
     let mdns_message = message(query.clone(), vec![mdns_record.clone()], vec![], vec![]);
 
-    let mut reactor = Runtime::new().unwrap();
-
     let udp_nameserver = mock_nameserver(vec![udp_message.map(Into::into)], Default::default());
     let tcp_nameserver = mock_nameserver(vec![tcp_message.map(Into::into)], Default::default());
     let mdns_nameserver = mock_nameserver(vec![mdns_message.map(Into::into)], Default::default());
@@ -241,7 +240,7 @@ fn test_local_mdns() {
     let request = message(query, vec![], vec![], vec![]).unwrap();
     let future = pool.send(request);
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], mdns_record);
 }
 
@@ -259,17 +258,15 @@ fn test_trust_nx_responses_fails_servfail() {
     let servfail_message = Ok(servfail_message);
 
     let v4_record = v4_record(query.name().clone(), Ipv4Addr::new(127, 0, 0, 2));
-    let success_msg = message(query.clone(), vec![v4_record.clone()], vec![], vec![]);
+    let success_msg = message(query.clone(), vec![v4_record], vec![], vec![]);
 
     let tcp_message = success_msg.clone();
     let udp_message = success_msg;
 
-    let mut reactor = Runtime::new().unwrap();
-
     // fail the first udp request
     let udp_nameserver = mock_nameserver(
         vec![
-            udp_message.clone().map(Into::into),
+            udp_message.map(Into::into),
             servfail_message.clone().map(Into::into),
         ],
         options,
@@ -283,7 +280,7 @@ fn test_trust_nx_responses_fails_servfail() {
     let request = message(query.clone(), vec![], vec![], vec![]).unwrap();
     let future = pool.send(request);
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert!(response.response_code() == ResponseCode::ServFail);
 
     // fail all udp succeed tcp
@@ -295,7 +292,7 @@ fn test_trust_nx_responses_fails_servfail() {
     let request = message(query, vec![], vec![], vec![]).unwrap();
     let future = pool.send(request);
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert!(response.response_code() == ResponseCode::ServFail);
 }
 
@@ -315,10 +312,8 @@ fn test_distrust_nx_responses() {
     let v4_record = v4_record(query.name().clone(), Ipv4Addr::new(127, 0, 0, 2));
     let success_msg = message(query.clone(), vec![v4_record.clone()], vec![], vec![]);
 
-    let tcp_message = success_msg.clone();
+    let tcp_message = success_msg;
     //let udp_message = success_msg;
-
-    let mut reactor = Runtime::new().unwrap();
 
     // fail the first udp request
     let udp_nameserver = mock_nameserver(vec![servfail_message.map(Into::into)], options);
@@ -330,7 +325,7 @@ fn test_distrust_nx_responses() {
     let request = message(query, vec![], vec![], vec![]).unwrap();
     let future = pool.send(request);
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], v4_record);
 }
 
@@ -353,26 +348,31 @@ impl OnSend for OnSendBarrier {
     fn on_send(
         &mut self,
         response: Result<DnsResponse, ProtoError>,
-    ) -> Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send> {
+    ) -> Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>> {
         self.barrier.fetch_sub(1, Ordering::Relaxed);
 
-        // loop until the barrier is 0
-        let loop_future = future::loop_fn(
-            (self.barrier.clone(), response),
-            move |(barrier, response)| {
-                let remaining = barrier.load(Ordering::Relaxed);
+        let barrier = self.barrier.clone();
+        let loop_future = wait_for(barrier, response);
 
-                match remaining {
-                    0 => response.map(Loop::Break),
-                    i if i > 0 => Ok(Loop::Continue((barrier, response))),
-                    i if i < 0 => panic!("more concurrency than expected: {}", i),
-                    _ => panic!("all other cases handled"),
-                }
-            },
-        );
-
-        Box::new(loop_future)
+        Box::pin(loop_future)
     }
+}
+
+async fn wait_for(
+    barrier: Arc<AtomicIsize>,
+    response: Result<DnsResponse, ProtoError>,
+) -> Result<DnsResponse, ProtoError> {
+    future::poll_fn(move |_| {
+        if barrier.load(Ordering::Relaxed) > 0 {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+
+    println!("done waiting");
+    response
 }
 
 #[test]
@@ -390,8 +390,6 @@ fn test_concurrent_requests() {
     let udp_record = v4_record(query.name().clone(), Ipv4Addr::new(127, 0, 0, 1));
 
     let udp_message = message(query.clone(), vec![udp_record.clone()], vec![], vec![]);
-
-    let mut reactor = Runtime::new().unwrap();
 
     let udp1_nameserver =
         mock_nameserver_on_send(vec![udp_message.map(Into::into)], options, on_send.clone());
@@ -413,7 +411,7 @@ fn test_concurrent_requests() {
     //   TODO: for some reason this timout doesn't work, not clear why...
     // let future = Timeout::new(future, Duration::from_secs(1));
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], udp_record);
 }
 
@@ -433,8 +431,6 @@ fn test_concurrent_requests_more_than_conns() {
 
     let udp_message = message(query.clone(), vec![udp_record.clone()], vec![], vec![]);
 
-    let mut reactor = Runtime::new().unwrap();
-
     let udp1_nameserver =
         mock_nameserver_on_send(vec![udp_message.map(Into::into)], options, on_send.clone());
     let udp2_nameserver = udp1_nameserver.clone();
@@ -455,7 +451,7 @@ fn test_concurrent_requests_more_than_conns() {
     //   TODO: for some reason this timout doesn't work, not clear why...
     // let future = Timeout::new(future, Duration::from_secs(1));
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], udp_record);
 }
 
@@ -475,8 +471,6 @@ fn test_concurrent_requests_1_conn() {
 
     let udp_message = message(query.clone(), vec![udp_record.clone()], vec![], vec![]);
 
-    let mut reactor = Runtime::new().unwrap();
-
     let udp1_nameserver =
         mock_nameserver_on_send(vec![udp_message.map(Into::into)], options, on_send.clone());
     let udp2_nameserver = udp1_nameserver.clone();
@@ -497,7 +491,7 @@ fn test_concurrent_requests_1_conn() {
     //   TODO: for some reason this timout doesn't work, not clear why...
     // let future = Timeout::new(future, Duration::from_secs(1));
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], udp_record);
 }
 
@@ -517,8 +511,6 @@ fn test_concurrent_requests_0_conn() {
 
     let udp_message = message(query.clone(), vec![udp_record.clone()], vec![], vec![]);
 
-    let mut reactor = Runtime::new().unwrap();
-
     let udp1_nameserver =
         mock_nameserver_on_send(vec![udp_message.map(Into::into)], options, on_send.clone());
     let udp2_nameserver = udp1_nameserver.clone();
@@ -539,6 +531,6 @@ fn test_concurrent_requests_0_conn() {
     //   TODO: for some reason this timout doesn't work, not clear why...
     // let future = Timeout::new(future, Duration::from_secs(1));
 
-    let response = reactor.block_on(future).unwrap();
+    let response = block_on(future).unwrap();
     assert_eq!(response.answers()[0], udp_record);
 }

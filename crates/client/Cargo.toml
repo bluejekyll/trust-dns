@@ -1,12 +1,13 @@
 [package]
-name = "trust-dns"
-version = "0.17.0"
+name = "trust-dns-client"
+version = "0.20.0"
 authors = ["Benjamin Fry <benjaminfry@me.com>"]
+edition = "2018"
 
 # A short blurb about the package. This is not rendered in any format when
 # uploaded to crates.io (aka this is not markdown)
 description = """
-Trust-DNS is a safe and secure DNS library. This is the Client library with DNSec support. 
+Trust-DNS is a safe and secure DNS library. This is the Client library with DNSec support.
  DNSSec with NSEC validation for negative records, is complete. The client supports
  dynamic DNS with SIG0 authenticated requests, implementing easy to use high level
  funtions. Trust-DNS is based on the Tokio and Futures libraries, which means
@@ -35,9 +36,9 @@ categories = ["network-programming"]
 license = "MIT/Apache-2.0"
 
 [badges]
-travis-ci = { repository = "bluejekyll/trust-dns" }
-appveyor = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+#github-actions = { repository = "bluejekyll/trust-dns", branch = "master", workflow = "test" }
 codecov = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+maintenance = { status = "actively-developed" }
 
 [features]
 # TODO: the rustls and openssl crates are not deps... should we change that to make them easier to use?
@@ -60,29 +61,28 @@ serde-config = ["serde"]
 mdns = ["trust-dns-proto/mdns"]
 
 [lib]
-name = "trust_dns"
+name = "trust_dns_client"
 path = "src/lib.rs"
 
 [dependencies]
-chrono = "^0.4"
-data-encoding = "2.1.0"
-data-encoding-macro = "0.1.7"
-failure = "0.1"
-futures = "^0.1.28"
-lazy_static = "^1.0"
-log = "^0.4.8"
-openssl = { version = "^0.10", features = ["v102", "v110"], optional = true }
-radix_trie = "0.1.2"
+backtrace = "0.3.48"
+chrono = "0.4"
+data-encoding = "2.2.0"
+futures = { version = "0.3.5", default-features = false, features = ["std"] }
+lazy_static = "1.0"
+log = "0.4"
+openssl = { version = "0.10", features = ["v102", "v110"], optional = true }
+radix_trie = "0.1.6"
 rand = "0.7"
 ring = { version = "0.16", optional = true, features = ["std"]}
-rustls = { version = "0.16", optional = true }
+rustls = { version = "0.17", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
-tokio = "^0.1.22"
-tokio-tcp = "^0.1"
-tokio-udp = "^0.1"
-trust-dns-https = {version = "0.4.0", path = "../https", optional = true }
-trust-dns-proto = {version = "0.8.0", path = "../proto", features = ["dnssec"]}
+thiserror = "1.0.18"
+tokio = { version = "0.2.16", features = ["rt-core"] }
+trust-dns-https = { version = "0.20.0", path = "../https", optional = true }
+trust-dns-proto = { version = "0.20.0", path = "../proto", features = ["dnssec"]}
 webpki = { version = "0.21", optional = true }
 
 [dev-dependencies]
-openssl = { version = "^0.10", features = ["v102", "v110"], optional = false }
+futures = { version = "0.3.5", default-features = false, features = ["std", "executor"] }
+openssl = { version = "0.10", features = ["v102", "v110"], optional = false }

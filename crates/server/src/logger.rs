@@ -50,7 +50,7 @@ fn get_env() -> String {
 
 fn all_trust_dns(level: &str) -> String {
     format!(
-        ",named={level},trust_dns={level},trust_dns_server={level},trust_dns_proto={level},trust_dns_resolver={level}",
+        ",named={level},trust_dns_client={level},trust_dns_server={level},trust_dns_proto={level},trust_dns_resolver={level},trust_dns_https={level}",
         level = level
     )
 }
@@ -69,10 +69,10 @@ pub fn default() {
     logger(&rust_log);
 }
 
-/// appends trust-dns-server info to RUST_LOG
+/// appends trust-dns-server error to RUST_LOG
 pub fn quiet() {
     let mut rust_log = get_env();
-    rust_log.push_str(&all_trust_dns("info"));
+    rust_log.push_str(&all_trust_dns("error"));
     logger(&rust_log);
 }
 

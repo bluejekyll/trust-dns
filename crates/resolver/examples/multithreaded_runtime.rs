@@ -4,26 +4,27 @@
 //! you might integrate the resolver into a more complex application.
 
 extern crate env_logger;
-extern crate futures;
+extern crate futures_util;
+#[cfg(feature = "tokio-runtime")]
 extern crate tokio;
 extern crate trust_dns_resolver;
 
-use futures::Future;
-use tokio::runtime::Runtime;
-use trust_dns_resolver::AsyncResolver;
-
+#[cfg(feature = "tokio-runtime")]
 fn main() {
+    use tokio::runtime::Runtime;
+    use trust_dns_resolver::TokioAsyncResolver;
+
     env_logger::init();
 
     // Set up the standard tokio runtime (multithreaded by default).
     let mut runtime = Runtime::new().expect("Failed to create runtime");
 
-    let (resolver, bg) = {
+    let resolver = {
         // To make this independent, if targeting macOS, BSD, Linux, or Windows, we can use the system's configuration:
         #[cfg(any(unix, windows))]
         {
             // use the system resolver configuration
-            AsyncResolver::from_system_conf().expect("Failed to create AsyncResolver")
+            TokioAsyncResolver::from_system_conf(runtime.handle().clone())
         }
 
         // For other operating systems, we can use one of the preconfigured definitions
@@ -33,13 +34,14 @@ fn main() {
             use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
             // Get a new resolver with the google nameservers as the upstream recursive resolvers
-            AsyncResolver::new(ResolverConfig::google(), ResolverOpts::default())
+            AsyncResolver::new(
+                ResolverConfig::google(),
+                ResolverOpts::default(),
+                runtime.handle().clone(),
+            )
         }
-    };
-
-    // The resolver background task needs to be created in the runtime so it can
-    // connect to the reactor.
-    runtime.spawn(bg);
+    }
+    .expect("failed to create resolver");
 
     // Create some futures representing name lookups.
     let names = &["www.google.com", "www.reddit.com", "www.wikipedia.org"];
@@ -50,7 +52,8 @@ fn main() {
 
     // Go through the list of resolution operations and wait for them to complete.
     for (name, lookup) in futures.drain(..) {
-        let ips = runtime.block_on(lookup)
+        let ips = runtime
+            .block_on(lookup)
             .expect("Failed completing lookup future")
             .iter()
             .collect::<Vec<_>>();
@@ -58,10 +61,11 @@ fn main() {
     }
 
     // Drop the resolver, which means that the runtime will become idle.
+    drop(futures);
     drop(resolver);
+}
 
-    // Once we have finished using the runtime, we can ask it to shut down when it's done.
-    let shutdown = runtime.shutdown_on_idle();
-    // Wait for the runtime to complete shutting down.
-    shutdown.wait().expect("Failed when shutting down runtime");
+#[cfg(not(feature = "tokio-runtime"))]
+fn main() {
+    println!("tokio-runtime feature must be enabled")
 }

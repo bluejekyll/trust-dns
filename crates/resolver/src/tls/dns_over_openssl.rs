@@ -9,18 +9,20 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 
-use futures::Future;
+use futures_util::future::Future;
 
-use trust_dns_openssl::{TlsClientStream, TlsClientStreamBuilder};
 use proto::error::ProtoError;
 use proto::BufDnsStreamHandle;
+use trust_dns_openssl::{TlsClientStream, TlsClientStreamBuilder};
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn new_tls_stream(
     socket_addr: SocketAddr,
     dns_name: String,
 ) -> (
-    Box<Future<Item = TlsClientStream, Error = ProtoError> + Send>,
+    Pin<Box<dyn Future<Output = Result<TlsClientStream, ProtoError>> + Send>>,
     BufDnsStreamHandle,
 ) {
     let tls_builder = TlsClientStreamBuilder::new();

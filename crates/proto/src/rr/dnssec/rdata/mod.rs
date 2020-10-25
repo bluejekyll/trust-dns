@@ -27,6 +27,11 @@ pub mod nsec3;
 pub mod nsec3param;
 pub mod sig;
 
+use std::str::FromStr;
+
+use enum_as_inner::EnumAsInner;
+use log::debug;
+
 use crate::error::*;
 use crate::rr::rdata::null;
 use crate::rr::rdata::NULL;
@@ -46,21 +51,21 @@ pub enum DNSSECRecordType {
     //  CDS,        //	59	RFC 7344	Child DS
     //  CDNSKEY,    //	60	RFC 7344	Child DNSKEY
     //  DLV,        //	32769	RFC 4431	DNSSEC Lookaside Validation record
-    /// RFC 4034	DNS Key record: RSASHA256 and RSASHA512, RFC5702
+    /// RFC 4034 DNS Key record: RSASHA256 and RSASHA512, RFC5702
     DNSKEY,
-    /// RFC 4034	Delegation signer: RSASHA256 and RSASHA512, RFC5702
+    /// RFC 4034 Delegation signer: RSASHA256 and RSASHA512, RFC5702
     DS,
-    /// RFC 2535[3] and RFC 2930[4]	Key record
+    /// RFC 2535[3] and RFC 2930[4] Key record
     KEY,
-    /// RFC 4034	Next-Secure record
+    /// RFC 4034 Next-Secure record
     NSEC,
-    /// RFC 5155	NSEC record version 3
+    /// RFC 5155 NSEC record version 3
     NSEC3,
-    /// RFC 5155	NSEC3 parameters
+    /// RFC 5155 NSEC3 parameters
     NSEC3PARAM,
-    /// RFC 4034	DNSSEC signature: RSASHA256 and RSASHA512, RFC5702
+    /// RFC 4034 DNSSEC signature: RSASHA256 and RSASHA512, RFC5702
     RRSIG,
-    /// RFC 2535 (2931)	Signature, to support 2137 Update.
+    /// RFC 2535 (2931) Signature, to support 2137 Update.
     ///
     /// This isn't really a DNSSEC record type, but it is here because, at least
     /// for now, we enable/disable SIG(0) in exactly the same circumstances that
@@ -68,6 +73,24 @@ pub enum DNSSECRecordType {
     SIG,
     /// Unknown or not yet supported DNSSec record type
     Unknown(u16),
+}
+
+impl FromStr for DNSSECRecordType {
+    type Err = ProtoError;
+
+    fn from_str(str: &str) -> ProtoResult<Self> {
+        match str {
+            "DNSKEY" => Ok(DNSSECRecordType::DNSKEY),
+            "DS" => Ok(DNSSECRecordType::DS),
+            "KEY" => Ok(DNSSECRecordType::KEY),
+            "NSEC" => Ok(DNSSECRecordType::NSEC),
+            "NSEC3" => Ok(DNSSECRecordType::NSEC3),
+            "NSEC3PARAM" => Ok(DNSSECRecordType::NSEC3PARAM),
+            "RRSIG" => Ok(DNSSECRecordType::RRSIG),
+            "SIG" => Ok(DNSSECRecordType::SIG),
+            _ => Err(ProtoErrorKind::UnknownRecordTypeStr(str.to_string()).into()),
+        }
+    }
 }
 
 impl From<u16> for DNSSECRecordType {

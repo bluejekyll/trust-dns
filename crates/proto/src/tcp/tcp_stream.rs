@@ -10,27 +10,32 @@
 use std::io;
 use std::mem;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::stream::{Fuse, Peekable, Stream};
-use futures::sync::mpsc::{unbounded, UnboundedReceiver};
-use futures::{Async, Future, Poll};
-use tokio_timer::Timeout;
+use async_trait::async_trait;
+use futures_channel::mpsc::{unbounded, UnboundedReceiver};
+use futures_io::{AsyncRead, AsyncWrite};
+use futures_util::stream::{Fuse, Peekable, Stream, StreamExt};
+use futures_util::{self, future::Future, ready, FutureExt};
+use log::debug;
 
 use crate::error::*;
 use crate::xfer::{BufStreamHandle, SerialMessage};
+use crate::Time;
 
 /// Trait for TCP connection
+#[async_trait]
 pub trait Connect
 where
     Self: Sized,
 {
     /// TcpSteam
-    type Transport: io::Read + io::Write + Send;
-    /// Future returned by connect
-    type Future: Future<Item = Self::Transport, Error = io::Error> + Send;
+    type Transport: AsyncRead + AsyncWrite + Send + Unpin;
+
     /// connect to tcp
-    fn connect(addr: &SocketAddr) -> Self::Future;
+    async fn connect(addr: SocketAddr) -> io::Result<Self::Transport>;
 }
 
 /// Current state while writing to the remote of the TCP connection
@@ -88,6 +93,22 @@ impl<S> TcpStream<S> {
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
+
+    fn pollable_split(
+        &mut self,
+    ) -> (
+        &mut S,
+        &mut Peekable<Fuse<UnboundedReceiver<SerialMessage>>>,
+        &mut Option<WriteTcpState>,
+        &mut ReadTcpState,
+    ) {
+        (
+            &mut self.socket,
+            &mut self.outbound_messages,
+            &mut self.send_state,
+            &mut self.read_state,
+        )
+    }
 }
 
 impl<S: Connect + 'static> TcpStream<S> {
@@ -99,16 +120,17 @@ impl<S: Connect + 'static> TcpStream<S> {
     ///
     /// * `name_server` - the IP and Port of the DNS server to connect to
     #[allow(clippy::new_ret_no_self, clippy::type_complexity)]
-    pub fn new<E>(
+    pub fn new<E, TE>(
         name_server: SocketAddr,
     ) -> (
-        Box<dyn Future<Item = TcpStream<S::Transport>, Error = io::Error> + Send>,
+        impl Future<Output = Result<TcpStream<S::Transport>, io::Error>> + Send,
         BufStreamHandle,
     )
     where
         E: FromProtoError,
+        TE: Time,
     {
-        Self::with_timeout(name_server, Duration::from_secs(5))
+        Self::with_timeout::<TE>(name_server, Duration::from_secs(5))
     }
 
     /// Creates a new future of the eventually establish a IO stream connection or fail trying
@@ -118,47 +140,53 @@ impl<S: Connect + 'static> TcpStream<S> {
     /// * `name_server` - the IP and Port of the DNS server to connect to
     /// * `timeout` - connection timeout
     #[allow(clippy::type_complexity)]
-    pub fn with_timeout(
+    pub fn with_timeout<TE: Time>(
         name_server: SocketAddr,
         timeout: Duration,
     ) -> (
-        Box<dyn Future<Item = TcpStream<S::Transport>, Error = io::Error> + Send>,
+        impl Future<Output = Result<TcpStream<S::Transport>, io::Error>> + Send,
         BufStreamHandle,
     ) {
         let (message_sender, outbound_messages) = unbounded();
         let message_sender = BufStreamHandle::new(message_sender);
         // This set of futures collapses the next tcp socket into a stream which can be used for
         //  sending and receiving tcp packets.
-        let tcp = S::connect(&name_server);
-        let stream = Timeout::new(tcp, timeout)
-            .map_err(move |e| {
-                debug!("timed out connecting to: {}", name_server);
-                e.into_inner().unwrap_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("timed out connecting to: {}", name_server),
-                    )
-                })
-            })
-            .map(move |tcp_stream| {
-                debug!("TCP connection established to: {}", name_server);
-                TcpStream {
-                    socket: tcp_stream,
-                    outbound_messages: outbound_messages.fuse().peekable(),
-                    send_state: None,
-                    read_state: ReadTcpState::LenBytes {
-                        pos: 0,
-                        bytes: [0u8; 2],
-                    },
-                    peer_addr: name_server,
-                }
-            });
+        let stream_fut = Self::connect::<TE>(name_server, timeout, outbound_messages);
 
-        (Box::new(stream), message_sender)
+        (stream_fut, message_sender)
+    }
+
+    async fn connect<TE: Time>(
+        name_server: SocketAddr,
+        timeout: Duration,
+        outbound_messages: UnboundedReceiver<SerialMessage>,
+    ) -> Result<TcpStream<S::Transport>, io::Error> {
+        let tcp = S::connect(name_server);
+        TE::timeout(timeout, tcp)
+            .map(
+                move |tcp_stream: Result<Result<S::Transport, io::Error>, _>| {
+                    tcp_stream
+                        .and_then(|tcp_stream| tcp_stream)
+                        .map(|tcp_stream| {
+                            debug!("TCP connection established to: {}", name_server);
+                            TcpStream {
+                                socket: tcp_stream,
+                                outbound_messages: outbound_messages.fuse().peekable(),
+                                send_state: None,
+                                read_state: ReadTcpState::LenBytes {
+                                    pos: 0,
+                                    bytes: [0u8; 2],
+                                },
+                                peer_addr: name_server,
+                            }
+                        })
+                },
+            )
+            .await
     }
 }
 
-impl<S> TcpStream<S> {
+impl<S: AsyncRead + AsyncWrite> TcpStream<S> {
     /// Initializes a TcpStream.
     ///
     /// This is intended for use with a TcpListener and Incoming.
@@ -195,96 +223,92 @@ impl<S> TcpStream<S> {
     }
 }
 
-impl<S: io::Read + io::Write> Stream for TcpStream<S> {
-    type Item = SerialMessage;
-    type Error = io::Error;
+impl<S: AsyncRead + AsyncWrite + Unpin> Stream for TcpStream<S> {
+    type Item = io::Result<SerialMessage>;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    #[allow(clippy::cognitive_complexity)]
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let peer = self.peer_addr;
+        let (socket, outbound_messages, send_state, read_state) = self.pollable_split();
+        let mut socket = Pin::new(socket);
+        let mut outbound_messages = Pin::new(outbound_messages);
+
         // this will not accept incoming data while there is data to send
         //  makes this self throttling.
         // TODO: it might be interesting to try and split the sending and receiving futures.
         loop {
             // in the case we are sending, send it all?
-            if self.send_state.is_some() {
+            if send_state.is_some() {
                 // sending...
-                match self.send_state {
+                match send_state {
                     Some(WriteTcpState::LenBytes {
                         ref mut pos,
                         ref length,
                         ..
                     }) => {
-                        let wrote = try_nb!(self.socket.write(&length[*pos..]));
+                        let wrote = ready!(socket.as_mut().poll_write(cx, &length[*pos..]))?;
                         *pos += wrote;
                     }
                     Some(WriteTcpState::Bytes {
                         ref mut pos,
                         ref bytes,
                     }) => {
-                        let wrote = try_nb!(self.socket.write(&bytes[*pos..]));
+                        let wrote = ready!(socket.as_mut().poll_write(cx, &bytes[*pos..]))?;
                         *pos += wrote;
                     }
                     Some(WriteTcpState::Flushing) => {
-                        try_nb!(self.socket.flush());
+                        ready!(socket.as_mut().poll_flush(cx))?;
                     }
                     _ => (),
                 }
 
                 // get current state
-                let current_state = mem::replace(&mut self.send_state, None);
+                let current_state = send_state.take();
 
                 // switch states
                 match current_state {
                     Some(WriteTcpState::LenBytes { pos, length, bytes }) => {
                         if pos < length.len() {
                             mem::replace(
-                                &mut self.send_state,
+                                send_state,
                                 Some(WriteTcpState::LenBytes { pos, length, bytes }),
                             );
                         } else {
-                            mem::replace(
-                                &mut self.send_state,
-                                Some(WriteTcpState::Bytes { pos: 0, bytes }),
-                            );
+                            mem::replace(send_state, Some(WriteTcpState::Bytes { pos: 0, bytes }));
                         }
                     }
                     Some(WriteTcpState::Bytes { pos, bytes }) => {
                         if pos < bytes.len() {
-                            mem::replace(
-                                &mut self.send_state,
-                                Some(WriteTcpState::Bytes { pos, bytes }),
-                            );
+                            mem::replace(send_state, Some(WriteTcpState::Bytes { pos, bytes }));
                         } else {
                             // At this point we successfully delivered the entire message.
                             //  flush
-                            mem::replace(&mut self.send_state, Some(WriteTcpState::Flushing));
+                            mem::replace(send_state, Some(WriteTcpState::Flushing));
                         }
                     }
                     Some(WriteTcpState::Flushing) => {
                         // At this point we successfully delivered the entire message.
-                        mem::replace(&mut self.send_state, None);
+                        send_state.take();
                     }
                     None => (),
                 };
             } else {
                 // then see if there is more to send
-                match self
-                    .outbound_messages
-                    .poll()
-                    .map_err(|()| io::Error::new(io::ErrorKind::Other, "unknown"))?
+                match outbound_messages.as_mut().poll_next(cx)
+                    // .map_err(|()| io::Error::new(io::ErrorKind::Other, "unknown"))?
                 {
                     // already handled above, here to make sure the poll() pops the next message
-                    Async::Ready(Some(message)) => {
+                    Poll::Ready(Some(message)) => {
                         // if there is no peer, this connection should die...
                         let (buffer, dst) = message.unwrap();
-                        let peer = self.peer_addr;
 
                         // This is an error if the destination is not our peer (this is TCP after all)
                         //  This will kill the connection...
                         if peer != dst {
-                            return Err(io::Error::new(
+                            return Poll::Ready(Some(Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("mismatched peer: {} and dst: {}", peer, dst),
-                            ));
+                            ))));
                         }
 
                         // will return if the socket will block
@@ -295,7 +319,7 @@ impl<S: io::Read + io::Write> Stream for TcpStream<S> {
                         ];
 
                         debug!("sending message len: {} to: {}", buffer.len(), dst);
-                        self.send_state = Some(WriteTcpState::LenBytes {
+                        *send_state = Some(WriteTcpState::LenBytes {
                             pos: 0,
                             length: len,
                             bytes: buffer,
@@ -303,8 +327,8 @@ impl<S: io::Read + io::Write> Stream for TcpStream<S> {
                     }
                     // now we get to drop through to the receives...
                     // TODO: should we also return None if there are no more messages to send?
-                    Async::NotReady => break,
-                    Async::Ready(None) => {
+                    Poll::Pending => break,
+                    Poll::Ready(None) => {
                         debug!("no messages to send");
                         break;
                     }
@@ -319,13 +343,13 @@ impl<S: io::Read + io::Write> Stream for TcpStream<S> {
         while ret_buf.is_none() {
             // Evaluates the next state. If None is the result, then no state change occurs,
             //  if Some(_) is returned, then that will be used as the next state.
-            let new_state: Option<ReadTcpState> = match self.read_state {
+            let new_state: Option<ReadTcpState> = match read_state {
                 ReadTcpState::LenBytes {
                     ref mut pos,
                     ref mut bytes,
                 } => {
                     // debug!("reading length {}", bytes.len());
-                    let read = try_nb!(self.socket.read(&mut bytes[*pos..]));
+                    let read = ready!(socket.as_mut().poll_read(cx, &mut bytes[*pos..]))?;
                     if read == 0 {
                         // the Stream was closed!
                         debug!("zero bytes read, stream closed?");
@@ -333,12 +357,12 @@ impl<S: io::Read + io::Write> Stream for TcpStream<S> {
 
                         if *pos == 0 {
                             // Since this is the start of the next message, we have a clean end
-                            return Ok(Async::Ready(None));
+                            return Poll::Ready(None);
                         } else {
-                            return Err(io::Error::new(
+                            return Poll::Ready(Some(Err(io::Error::new(
                                 io::ErrorKind::BrokenPipe,
                                 "closed while reading length",
-                            ));
+                            ))));
                         }
                     }
                     debug!("in ReadTcpState::LenBytes: {}", pos);
@@ -362,17 +386,17 @@ impl<S: io::Read + io::Write> Stream for TcpStream<S> {
                     ref mut pos,
                     ref mut bytes,
                 } => {
-                    let read = try_nb!(self.socket.read(&mut bytes[*pos..]));
+                    let read = ready!(socket.as_mut().poll_read(cx, &mut bytes[*pos..]))?;
                     if read == 0 {
                         // the Stream was closed!
                         debug!("zero bytes read for message, stream closed?");
 
                         // Since this is the start of the next message, we have a clean end
                         // try!(self.socket.shutdown(Shutdown::Both));  // TODO: add generic shutdown function
-                        return Err(io::Error::new(
+                        return Poll::Ready(Some(Err(io::Error::new(
                             io::ErrorKind::BrokenPipe,
                             "closed while reading message",
-                        ));
+                        ))));
                     }
 
                     debug!("in ReadTcpState::Bytes: {}", bytes.len());
@@ -394,9 +418,7 @@ impl<S: io::Read + io::Write> Stream for TcpStream<S> {
             // this will move to the next state,
             //  if it was a completed receipt of bytes, then it will move out the bytes
             if let Some(state) = new_state {
-                if let ReadTcpState::Bytes { pos, bytes } =
-                    mem::replace(&mut self.read_state, state)
-                {
+                if let ReadTcpState::Bytes { pos, bytes } = mem::replace(read_state, state) {
                     debug!("returning bytes");
                     assert_eq!(pos, bytes.len());
                     ret_buf = Some(bytes);
@@ -404,140 +426,49 @@ impl<S: io::Read + io::Write> Stream for TcpStream<S> {
             }
         }
 
-        // if the buffer is ready, return it, if not we're NotReady
+        // if the buffer is ready, return it, if not we're Pending
         if let Some(buffer) = ret_buf {
             debug!("returning buffer");
             let src_addr = self.peer_addr;
-            return Ok(Async::Ready(Some(SerialMessage::new(buffer, src_addr))));
+            Poll::Ready(Some(Ok(SerialMessage::new(buffer, src_addr))))
         } else {
             debug!("bottomed out");
             // at a minimum the outbound_messages should have been polled,
             //  which will wake this future up later...
-            return Ok(Async::NotReady);
+            Poll::Pending
         }
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 #[cfg(test)]
-use std::net::Ipv6Addr;
-#[cfg(test)]
-use std::net::{IpAddr, Ipv4Addr};
+#[cfg(feature = "tokio-runtime")]
+mod tests {
+    #[cfg(not(target_os = "linux"))]
+    use std::net::Ipv6Addr;
+    use std::net::{IpAddr, Ipv4Addr};
+    use tokio::net::TcpStream as TokioTcpStream;
+    use tokio::runtime::Runtime;
 
-#[test]
-// this fails on linux for some reason. It appears that a buffer somewhere is dirty
-//  and subsequent reads of a message buffer reads the wrong length. It works for 2 iterations
-//  but not 3?
-// #[cfg(not(target_os = "linux"))]
-fn test_tcp_client_stream_ipv4() {
-    tcp_client_stream_test(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
-}
+    use crate::iocompat::AsyncIo02As03;
+    use crate::TokioTime;
 
-#[test]
-#[cfg(not(target_os = "linux"))] // ignored until Travis-CI fixes IPv6
-fn test_tcp_client_stream_ipv6() {
-    tcp_client_stream_test(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)))
-}
-
-#[cfg(test)]
-const TEST_BYTES: &[u8; 8] = b"DEADBEEF";
-#[cfg(test)]
-const TEST_BYTES_LEN: usize = 8;
-
-#[cfg(test)]
-fn tcp_client_stream_test(server_addr: IpAddr) {
-    use std::io::{Read, Write};
-    use tokio::runtime::current_thread::Runtime;
-
-    let succeeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let succeeded_clone = succeeded.clone();
-    std::thread::Builder::new()
-        .name("thread_killer".to_string())
-        .spawn(move || {
-            let succeeded = succeeded_clone.clone();
-            for _ in 0..15 {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if succeeded.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-            }
-
-            panic!("timeout");
-        })
-        .unwrap();
-
-    // TODO: need a timeout on listen
-    let server = std::net::TcpListener::bind(SocketAddr::new(server_addr, 0)).unwrap();
-    let server_addr = server.local_addr().unwrap();
-
-    let send_recv_times = 4;
-
-    // an in and out server
-    let server_handle = std::thread::Builder::new()
-        .name("test_tcp_client_stream:server".to_string())
-        .spawn(move || {
-            let (mut socket, _) = server.accept().expect("accept failed");
-
-            socket
-                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                .unwrap(); // should receive something within 5 seconds...
-            socket
-                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-                .unwrap(); // should receive something within 5 seconds...
-
-            for _ in 0..send_recv_times {
-                // wait for some bytes...
-                let mut len_bytes = [0_u8; 2];
-                socket
-                    .read_exact(&mut len_bytes)
-                    .expect("SERVER: receive failed");
-                let length =
-                    u16::from(len_bytes[0]) << 8 & 0xFF00 | u16::from(len_bytes[1]) & 0x00FF;
-                assert_eq!(length as usize, TEST_BYTES_LEN);
-
-                let mut buffer = [0_u8; TEST_BYTES_LEN];
-                socket.read_exact(&mut buffer).unwrap();
-
-                // println!("read bytes iter: {}", i);
-                assert_eq!(&buffer, TEST_BYTES);
-
-                // bounce them right back...
-                socket
-                    .write_all(&len_bytes)
-                    .expect("SERVER: send length failed");
-                socket
-                    .write_all(&buffer)
-                    .expect("SERVER: send buffer failed");
-                // println!("wrote bytes iter: {}", i);
-                std::thread::yield_now();
-            }
-        })
-        .unwrap();
-
-    // setup the client, which is going to run on the testing thread...
-    let mut io_loop = Runtime::new().unwrap();
-
-    // the tests should run within 5 seconds... right?
-    // TODO: add timeout here, so that test never hangs...
-    // let timeout = Timeout::new(Duration::from_secs(5));
-    let (stream, sender) = TcpStream::<tokio_tcp::TcpStream>::new::<ProtoError>(server_addr);
-
-    let mut stream = io_loop.block_on(stream).expect("run failed to get stream");
-
-    for _ in 0..send_recv_times {
-        // test once
-        sender
-            .unbounded_send(SerialMessage::new(TEST_BYTES.to_vec(), server_addr))
-            .expect("send failed");
-        let (buffer, stream_tmp) = io_loop
-            .block_on(stream.into_future())
-            .ok()
-            .expect("future iteration run failed");
-        stream = stream_tmp;
-        let message = buffer.expect("no buffer received");
-        assert_eq!(message.bytes(), TEST_BYTES);
+    use crate::tests::tcp_stream_test;
+    #[test]
+    fn test_tcp_stream_ipv4() {
+        let io_loop = Runtime::new().expect("failed to create tokio runtime");
+        tcp_stream_test::<AsyncIo02As03<TokioTcpStream>, Runtime, TokioTime>(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            io_loop,
+        )
     }
 
-    succeeded.store(true, std::sync::atomic::Ordering::Relaxed);
-    server_handle.join().expect("server thread failed");
+    #[test]
+    #[cfg(not(target_os = "linux"))] // ignored until Travis-CI fixes IPv6
+    fn test_tcp_stream_ipv6() {
+        let io_loop = Runtime::new().expect("failed to create tokio runtime");
+        tcp_stream_test::<AsyncIo02As03<TokioTcpStream>, Runtime, TokioTime>(
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
+            io_loop,
+        )
+    }
 }

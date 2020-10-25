@@ -3,13 +3,14 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
+use futures::executor::block_on;
 use futures::Future;
 
-use trust_dns::op::update_message;
-use trust_dns::op::{Message, Query, ResponseCode};
-use trust_dns::proto::rr::{DNSClass, Name, RData, Record, RecordSet, RecordType};
-use trust_dns::rr::dnssec::{Algorithm, Signer, SupportedAlgorithms, Verifier};
-use trust_dns::serialize::binary::{BinDecodable, BinEncodable};
+use trust_dns_client::op::update_message;
+use trust_dns_client::op::{Message, Query, ResponseCode};
+use trust_dns_client::proto::rr::{DNSClass, Name, RData, Record, RecordSet, RecordType};
+use trust_dns_client::rr::dnssec::{Algorithm, Signer, SupportedAlgorithms, Verifier};
+use trust_dns_client::serialize::binary::{BinDecodable, BinEncodable};
 use trust_dns_server::authority::{
     AuthLookup, Authority, LookupError, MessageRequest, UpdateResult,
 };
@@ -40,10 +41,8 @@ pub fn test_create<A: Authority<Lookup = AuthLookup>>(mut authority: A, keys: &[
         assert!(update_authority(message, key, &mut authority).expect("create failed"));
 
         let query = Query::query(name, RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         match lookup
             .into_iter()
@@ -89,10 +88,8 @@ pub fn test_create_multi<A: Authority<Lookup = AuthLookup>>(mut authority: A, ke
         assert!(update_authority(message, key, &mut authority).expect("create failed"));
 
         let query = Query::query(name, RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert!(lookup.iter().any(|rr| *rr == record));
         assert!(lookup.iter().any(|rr| *rr == record2));
@@ -138,10 +135,8 @@ pub fn test_append<A: Authority<Lookup = AuthLookup>>(mut authority: A, keys: &[
 
         // verify record contents
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 1);
         assert!(lookup.iter().any(|rr| *rr == record));
@@ -158,10 +153,8 @@ pub fn test_append<A: Authority<Lookup = AuthLookup>>(mut authority: A, keys: &[
         assert!(update_authority(message, key, &mut authority).expect("append failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 2);
 
@@ -177,10 +170,8 @@ pub fn test_append<A: Authority<Lookup = AuthLookup>>(mut authority: A, keys: &[
         assert!(!update_authority(message, key, &mut authority).expect("append failed"));
 
         let query = Query::query(name, RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 2);
 
@@ -223,10 +214,8 @@ pub fn test_append_multi<A: Authority<Lookup = AuthLookup>>(mut authority: A, ke
         assert!(update_authority(message, key, &mut authority).expect("append failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 3);
 
@@ -241,10 +230,8 @@ pub fn test_append_multi<A: Authority<Lookup = AuthLookup>>(mut authority: A, ke
         assert!(!update_authority(message, key, &mut authority).expect("append failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 3);
 
@@ -285,10 +272,8 @@ pub fn test_compare_and_swap<A: Authority<Lookup = AuthLookup>>(mut authority: A
         assert!(update_authority(message, key, &mut authority).expect("compare_and_swap failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 1);
         assert!(lookup.iter().any(|rr| *rr == new));
@@ -310,10 +295,8 @@ pub fn test_compare_and_swap<A: Authority<Lookup = AuthLookup>>(mut authority: A
         );
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 1);
         assert!(lookup.iter().any(|rr| *rr == new));
@@ -364,10 +347,8 @@ pub fn test_compare_and_swap_multi<A: Authority<Lookup = AuthLookup>>(
         assert!(update_authority(message, key, &mut authority).expect("compare_and_swap failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 2);
         assert!(lookup.iter().any(|rr| *rr == new1));
@@ -391,10 +372,8 @@ pub fn test_compare_and_swap_multi<A: Authority<Lookup = AuthLookup>>(
         );
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 2);
         assert!(lookup.iter().any(|rr| *rr == new1));
@@ -444,10 +423,8 @@ pub fn test_delete_by_rdata<A: Authority<Lookup = AuthLookup>>(mut authority: A,
         assert!(update_authority(message, key, &mut authority).expect("delete_by_rdata failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 1);
         assert!(lookup.iter().any(|rr| *rr == record1));
@@ -507,10 +484,8 @@ pub fn test_delete_by_rdata_multi<A: Authority<Lookup = AuthLookup>>(
         assert!(update_authority(message, key, &mut authority).expect("delete_by_rdata failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait()
-            .unwrap();
+        let lookup =
+            block_on(authority.search(&query.into(), false, SupportedAlgorithms::new())).unwrap();
 
         assert_eq!(lookup.iter().count(), 2);
         assert!(!lookup.iter().any(|rr| *rr == record1));
@@ -558,12 +533,10 @@ pub fn test_delete_rrset<A: Authority<Lookup = AuthLookup>>(mut authority: A, ke
         assert!(update_authority(message, key, &mut authority).expect("delete_rrset failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait();
+        let lookup = block_on(authority.search(&query.into(), false, SupportedAlgorithms::new()));
 
         assert_eq!(
-            *lookup.unwrap_err().as_responsecode().unwrap(),
+            *lookup.unwrap_err().as_response_code().unwrap(),
             ResponseCode::NXDomain
         );
     }
@@ -613,27 +586,23 @@ pub fn test_delete_all<A: Authority<Lookup = AuthLookup>>(mut authority: A, keys
         assert!(update_authority(message, key, &mut authority).expect("delete_all failed"));
 
         let query = Query::query(name.clone(), RecordType::A);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait();
+        let lookup = block_on(authority.search(&query.into(), false, SupportedAlgorithms::new()));
         assert_eq!(
-            *lookup.unwrap_err().as_responsecode().unwrap(),
+            *lookup.unwrap_err().as_response_code().unwrap(),
             ResponseCode::NXDomain
         );
 
         let query = Query::query(name.clone(), RecordType::AAAA);
-        let lookup = authority
-            .search(&query.into(), false, SupportedAlgorithms::new())
-            .wait();
+        let lookup = block_on(authority.search(&query.into(), false, SupportedAlgorithms::new()));
         assert_eq!(
-            *lookup.unwrap_err().as_responsecode().unwrap(),
+            *lookup.unwrap_err().as_response_code().unwrap(),
             ResponseCode::NXDomain
         );
     }
 }
 
 pub fn add_auth<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<Signer> {
-    use trust_dns::rr::rdata::key::KeyUsage;
+    use trust_dns_client::rr::rdata::key::KeyUsage;
     use trust_dns_server::config::dnssec::*;
 
     let update_name = Name::from_str("update")
@@ -647,10 +616,10 @@ pub fn add_auth<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<Sig
     #[cfg(feature = "dnssec-openssl")]
     {
         let key_config = KeyConfig {
-            key_path: "tests/named_test_configs/dnssec/rsa_2048.pem".to_string(),
+            key_path: "../../tests/test-data/named_test_configs/dnssec/rsa_2048.pem".to_string(),
             password: Some("123456".to_string()),
             algorithm: Algorithm::RSASHA512.to_string(),
-            signer_name: Some(update_name.clone().to_string()),
+            signer_name: Some(update_name.to_string()),
             is_zone_signing_key: Some(true),
             is_zone_update_auth: Some(false),
         };
@@ -673,7 +642,7 @@ pub fn add_auth<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<Sig
     // // ecdsa_p256
     // {
     //     let key_config = KeyConfig {
-    //         key_path: "tests/named_test_configs/dnssec/ecdsa_p256.pem".to_string(),
+    //         key_path: "tests/test-data/named_test_configs/dnssec/ecdsa_p256.pem".to_string(),
     //         password: None,
     //         algorithm: Algorithm::ECDSAP256SHA256.to_string(),
     //         signer_name: Some(signer_name.clone().to_string()),
@@ -690,7 +659,7 @@ pub fn add_auth<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<Sig
     // // ecdsa_p384
     // {
     //     let key_config = KeyConfig {
-    //         key_path: "tests/named_test_configs/dnssec/ecdsa_p384.pem".to_string(),
+    //         key_path: "../../tests/test-data/named_test_configs/dnssec/ecdsa_p384.pem".to_string(),
     //         password: None,
     //         algorithm: Algorithm::ECDSAP384SHA384.to_string(),
     //         signer_name: Some(signer_name.clone().to_string()),
@@ -708,10 +677,10 @@ pub fn add_auth<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<Sig
     #[cfg(feature = "dnssec-ring")]
     {
         let key_config = KeyConfig {
-            key_path: "tests/named_test_configs/dnssec/ed25519.pk8".to_string(),
+            key_path: "../../tests/test-data/named_test_configs/dnssec/ed25519.pk8".to_string(),
             password: None,
             algorithm: Algorithm::ED25519.to_string(),
-            signer_name: Some(update_name.clone().to_string()),
+            signer_name: Some(update_name.to_string()),
             is_zone_signing_key: Some(true),
             is_zone_update_auth: Some(false),
         };
@@ -738,9 +707,9 @@ macro_rules! define_update_test {
         $(
             #[test]
             fn $f () {
-                let mut authority = ::$new("tests/named_test_configs/example.com.zone", module_path!(), stringify!($f));
-                let keys = ::authority_battery::dynamic_update::add_auth(&mut authority);
-                ::authority_battery::dynamic_update::$f(authority, &keys);
+                let mut authority = crate::$new("../../tests/test-data/named_test_configs/example.com.zone", module_path!(), stringify!($f));
+                let keys = crate::authority_battery::dynamic_update::add_auth(&mut authority);
+                crate::authority_battery::dynamic_update::$f(authority, &keys);
             }
         )*
     }

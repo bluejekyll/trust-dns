@@ -39,9 +39,9 @@
 //! the description of name server logic in [RFC-1034] for details.
 //! ```
 
-use crate::serialize::binary::*;
 use crate::error::*;
 use crate::rr::domain::Name;
+use crate::serialize::binary::*;
 
 /// Read the RData from the given Decoder
 pub fn read(decoder: &mut BinDecoder) -> ProtoResult<Name> {
@@ -74,6 +74,8 @@ pub fn emit(encoder: &mut BinEncoder, name_data: &Name) -> ProtoResult<()> {
 
 #[test]
 pub fn test() {
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
+
     let rdata = Name::from_ascii("WWW.example.com.").unwrap();
 
     let mut bytes = Vec::new();
@@ -84,10 +86,6 @@ pub fn test() {
     println!("bytes: {:?}", bytes);
 
     let mut decoder: BinDecoder = BinDecoder::new(bytes);
-    let read_rdata = read(&mut decoder);
-    assert!(
-        read_rdata.is_ok(),
-        format!("error decoding: {:?}", read_rdata.unwrap_err())
-    );
-    assert_eq!(rdata, read_rdata.unwrap());
+    let read_rdata = read(&mut decoder).expect("Decoding error");
+    assert_eq!(rdata, read_rdata);
 }

@@ -5,45 +5,110 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::marker::Unpin;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use futures::{Future, Poll};
-use tokio_executor::{DefaultExecutor, Executor};
-use tokio_tcp::TcpStream as TokioTcpStream;
-use tokio_udp::UdpSocket as TokioUdpSocket;
+use futures_util::future::{Future, FutureExt};
+use futures_util::ready;
+#[cfg(feature = "tokio-runtime")]
+use tokio::net::TcpStream as TokioTcpStream;
+#[cfg(all(
+    feature = "dns-over-openssl",
+    not(feature = "dns-over-rustls"),
+    not(feature = "dns-over-native-tls")
+))]
+use tokio_openssl::SslStream as TokioTlsStream;
+#[cfg(feature = "dns-over-rustls")]
+use tokio_rustls::client::TlsStream as TokioTlsStream;
+#[cfg(all(feature = "dns-over-native-tls", not(feature = "dns-over-rustls")))]
+use tokio_tls::TlsStream as TokioTlsStream;
 
 use proto;
-#[cfg(feature = "mdns")]
-use proto::multicast::{MdnsClientStream, MdnsQueryType};
-use proto::op::NoopMessageFinalizer;
-use proto::tcp::TcpClientStream;
-use proto::udp::{UdpClientStream, UdpResponse};
-use proto::xfer::{
-    self, BufDnsRequestStreamHandle, DnsExchange, DnsHandle, DnsMultiplexer,
-    DnsMultiplexerSerialResponse, DnsRequest, DnsResponse,
-};
-#[cfg(feature = "dns-over-https")]
-use trust_dns_https;
+use proto::error::ProtoError;
 
-use config::{NameServerConfig, Protocol, ResolverOpts};
+#[cfg(feature = "tokio-runtime")]
+use proto::{iocompat::AsyncIo02As03, TokioTime};
+
+#[cfg(feature = "mdns")]
+use proto::multicast::{MdnsClientConnect, MdnsClientStream, MdnsQueryType};
+
+use proto::op::NoopMessageFinalizer;
+
+use proto::udp::UdpClientStream;
+use proto::udp::UdpResponse;
+use proto::xfer::{
+    DnsExchange, DnsExchangeSend, DnsHandle, DnsMultiplexerSerialResponse, DnsRequest, DnsResponse,
+};
+
+use proto::xfer::{DnsExchangeBackground, DnsMultiplexer};
+
+use proto::{
+    tcp::Connect, tcp::TcpClientConnect, tcp::TcpClientStream, udp::UdpClientConnect,
+    udp::UdpSocket, xfer::DnsExchangeConnect, xfer::DnsMultiplexerConnect, Time,
+};
+
+#[cfg(feature = "dns-over-https")]
+use trust_dns_https::{self, HttpsClientConnect, HttpsClientResponse, HttpsClientStream};
+
+use crate::config::Protocol;
+use crate::config::{NameServerConfig, ResolverOpts};
 
 /// A type to allow for custom ConnectionProviders. Needed mainly for mocking purposes.
-pub trait ConnectionProvider: 'static + Clone + Send + Sync {
-    type ConnHandle;
+///
+/// ConnectionProvider is responsible for spawning any background tasks as necessary.
+pub trait ConnectionProvider: 'static + Clone + Send + Sync + Unpin {
+    /// The handle to the connect for sending DNS requests.
+    type Conn: DnsHandle + Clone + Send + Sync + 'static;
+
+    /// Ths future is responsible for spawning any background tasks as necessary
+    type FutureConn: Future<Output = Result<Self::Conn, ProtoError>> + Send + 'static;
 
     /// The returned handle should
     fn new_connection(&self, config: &NameServerConfig, options: &ResolverOpts)
-        -> Self::ConnHandle;
+        -> Self::FutureConn;
+}
+
+/// RuntimeProvider defines which async runtime that handles IO and timers.
+pub trait RuntimeProvider: Clone + 'static {
+    /// Handle to the executor;
+    type Handle: Clone + Send + Spawn + Sync + Unpin;
+
+    /// Timer
+    type Timer: Time + Send + Unpin;
+
+    /// UdpSocket
+    type Udp: UdpSocket + Send;
+
+    /// TcpStream
+    type Tcp: Connect + Send + Unpin;
+}
+
+/// A type defines the Handle which can spawn future.
+pub trait Spawn {
+    fn spawn_bg<F>(&mut self, future: F)
+    where
+        F: Future<Output = Result<(), ProtoError>> + Send + 'static;
 }
 
 /// Standard connection implements the default mechanism for creating new Connections
 #[derive(Clone)]
-pub struct StandardConnection;
+pub struct GenericConnectionProvider<R: RuntimeProvider>(R::Handle);
 
-impl ConnectionProvider for StandardConnection {
-    type ConnHandle = ConnectionHandle;
+impl<R: RuntimeProvider> GenericConnectionProvider<R> {
+    pub fn new(handle: R::Handle) -> Self {
+        Self(handle)
+    }
+}
+
+impl<R> ConnectionProvider for GenericConnectionProvider<R>
+where
+    R: RuntimeProvider,
+    <R as RuntimeProvider>::Tcp: Connect,
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin,
+{
+    type Conn = GenericConnection;
+    type FutureConn = ConnectionFuture<R>;
 
     /// Constructs an initial constructor for the ConnectionHandle to be used to establish a
     ///   future connection.
@@ -51,124 +116,45 @@ impl ConnectionProvider for StandardConnection {
         &self,
         config: &NameServerConfig,
         options: &ResolverOpts,
-    ) -> Self::ConnHandle {
-        let dns_handle = match config.protocol {
-            Protocol::Udp => ConnectionHandleInner::Connect(Some(ConnectionHandleConnect::Udp {
-                socket_addr: config.socket_addr,
-                timeout: options.timeout,
-            })),
-            Protocol::Tcp => ConnectionHandleInner::Connect(Some(ConnectionHandleConnect::Tcp {
-                socket_addr: config.socket_addr,
-                timeout: options.timeout,
-            })),
-            #[cfg(feature = "dns-over-tls")]
-            Protocol::Tls => ConnectionHandleInner::Connect(Some(ConnectionHandleConnect::Tls {
-                socket_addr: config.socket_addr,
-                timeout: options.timeout,
-                tls_dns_name: config.tls_dns_name.clone().unwrap_or_default(),
-            })),
-            #[cfg(feature = "dns-over-https")]
-            Protocol::Https => {
-                ConnectionHandleInner::Connect(Some(ConnectionHandleConnect::Https {
-                    socket_addr: config.socket_addr,
-                    timeout: options.timeout,
-                    tls_dns_name: config.tls_dns_name.clone().unwrap_or_default(),
-                }))
+    ) -> Self::FutureConn {
+        let dns_connect = match config.protocol {
+            Protocol::Udp => {
+                let stream =
+                    UdpClientStream::<R::Udp>::with_timeout(config.socket_addr, options.timeout);
+                let exchange = DnsExchange::connect(stream);
+                ConnectionConnect::Udp(exchange)
             }
-            #[cfg(feature = "mdns")]
-            Protocol::Mdns => ConnectionHandleInner::Connect(Some(ConnectionHandleConnect::Mdns {
-                socket_addr: config.socket_addr,
-                timeout: options.timeout,
-            })),
-        };
+            Protocol::Tcp => {
+                let socket_addr = config.socket_addr;
+                let timeout = options.timeout;
 
-        ConnectionHandle(Arc::new(Mutex::new(dns_handle)))
-    }
-}
-
-/// The variants of all supported connections for the Resolver
-#[derive(Debug)]
-pub(crate) enum ConnectionHandleConnect {
-    Udp {
-        socket_addr: SocketAddr,
-        timeout: Duration,
-    },
-    Tcp {
-        socket_addr: SocketAddr,
-        timeout: Duration,
-    },
-    #[cfg(feature = "dns-over-tls")]
-    Tls {
-        socket_addr: SocketAddr,
-        timeout: Duration,
-        tls_dns_name: String,
-    },
-    #[cfg(feature = "dns-over-https")]
-    Https {
-        socket_addr: SocketAddr,
-        timeout: Duration,
-        tls_dns_name: String,
-    },
-    #[cfg(feature = "mdns")]
-    Mdns {
-        socket_addr: SocketAddr,
-        timeout: Duration,
-    },
-}
-
-impl ConnectionHandleConnect {
-    /// Establishes the connection, this is allowed to perform network operations,
-    ///   such as tokio::spawns of background tasks, etc.
-    fn connect(self) -> Result<ConnectionHandleConnected, proto::error::ProtoError> {
-        use self::ConnectionHandleConnect::*;
-
-        debug!("connecting: {:?}", self);
-        match self {
-            Udp {
-                socket_addr,
-                timeout,
-            } => {
-                let stream = UdpClientStream::<TokioUdpSocket>::with_timeout(socket_addr, timeout);
-                let (stream, handle) = DnsExchange::connect(stream);
-
-                let stream = stream.and_then(|stream| stream).map_err(|e| {
-                    debug!("udp connection shutting down: {}", e);
-                });
-                let handle = BufDnsRequestStreamHandle::new(handle);
-
-                DefaultExecutor::current().spawn(Box::new(stream))?;
-                Ok(ConnectionHandleConnected::Udp(handle))
-            }
-            Tcp {
-                socket_addr,
-                timeout,
-            } => {
                 let (stream, handle) =
-                    TcpClientStream::<TokioTcpStream>::with_timeout(socket_addr, timeout);
+                    TcpClientStream::<R::Tcp>::with_timeout::<R::Timer>(socket_addr, timeout);
                 // TODO: need config for Signer...
                 let dns_conn = DnsMultiplexer::with_timeout(
-                    Box::new(stream),
+                    stream,
                     handle,
                     timeout,
                     NoopMessageFinalizer::new(),
                 );
 
-                let (stream, handle) = DnsExchange::connect(dns_conn);
-                let stream = stream.and_then(|stream| stream).map_err(|e| {
-                    debug!("tcp connection shutting down: {}", e);
-                });
-                let handle = BufDnsRequestStreamHandle::new(handle);
-
-                DefaultExecutor::current().spawn(Box::new(stream))?;
-                Ok(ConnectionHandleConnected::Tcp(handle))
+                let exchange = DnsExchange::connect(dns_conn);
+                ConnectionConnect::Tcp(exchange)
             }
             #[cfg(feature = "dns-over-tls")]
-            Tls {
-                socket_addr,
-                timeout,
-                tls_dns_name,
-            } => {
-                let (stream, handle) = ::tls::new_tls_stream(socket_addr, tls_dns_name);
+            Protocol::Tls => {
+                let socket_addr = config.socket_addr;
+                let timeout = options.timeout;
+                let tls_dns_name = config.tls_dns_name.clone().unwrap_or_default();
+                #[cfg(feature = "dns-over-rustls")]
+                let client_config = config.tls_config.clone();
+
+                #[cfg(feature = "dns-over-rustls")]
+                let (stream, handle) =
+                    { crate::tls::new_tls_stream(socket_addr, tls_dns_name, client_config) };
+                #[cfg(not(feature = "dns-over-rustls"))]
+                let (stream, handle) = { crate::tls::new_tls_stream(socket_addr, tls_dns_name) };
+
                 let dns_conn = DnsMultiplexer::with_timeout(
                     stream,
                     Box::new(handle),
@@ -176,36 +162,25 @@ impl ConnectionHandleConnect {
                     NoopMessageFinalizer::new(),
                 );
 
-                let (stream, handle) = DnsExchange::connect(dns_conn);
-                let stream = stream.and_then(|stream| stream).map_err(|e| {
-                    debug!("tls connection shutting down: {}", e);
-                });
-                let handle = BufDnsRequestStreamHandle::new(handle);
-
-                DefaultExecutor::current().spawn(Box::new(stream))?;
-                Ok(ConnectionHandleConnected::Tcp(handle))
+                let exchange = DnsExchange::connect(dns_conn);
+                ConnectionConnect::Tls(exchange)
             }
             #[cfg(feature = "dns-over-https")]
-            Https {
-                socket_addr,
-                // TODO: https needs timeout!
-                timeout: _t,
-                tls_dns_name,
-            } => {
-                let (stream, handle) = ::https::new_https_stream(socket_addr, tls_dns_name);
+            Protocol::Https => {
+                let socket_addr = config.socket_addr;
+                let tls_dns_name = config.tls_dns_name.clone().unwrap_or_default();
+                #[cfg(feature = "dns-over-rustls")]
+                let client_config = config.tls_config.clone();
 
-                let stream = stream.and_then(|stream| stream).map_err(|e| {
-                    debug!("https connection shutting down: {}", e);
-                });
-
-                DefaultExecutor::current().spawn(Box::new(stream))?;
-                Ok(ConnectionHandleConnected::Https(handle))
+                let exchange =
+                    crate::https::new_https_stream::<R>(socket_addr, tls_dns_name, client_config);
+                ConnectionConnect::Https(exchange)
             }
             #[cfg(feature = "mdns")]
-            Mdns {
-                socket_addr,
-                timeout,
-            } => {
+            Protocol::Mdns => {
+                let socket_addr = config.socket_addr;
+                let timeout = options.timeout;
+
                 let (stream, handle) =
                     MdnsClientStream::new(socket_addr, MdnsQueryType::OneShot, None, None, None);
                 // TODO: need config for Signer...
@@ -216,144 +191,354 @@ impl ConnectionHandleConnect {
                     NoopMessageFinalizer::new(),
                 );
 
-                let (stream, handle) = DnsExchange::connect(dns_conn);
-                let stream = stream.and_then(|stream| stream).map_err(|e| {
-                    debug!("mdns connection shutting down: {}", e);
-                });
-                let handle = BufDnsRequestStreamHandle::new(handle);
-
-                DefaultExecutor::current().spawn(Box::new(stream))?;
-                Ok(ConnectionHandleConnected::Tcp(handle))
+                let exchange = DnsExchange::connect(dns_conn);
+                ConnectionConnect::Mdns(exchange)
             }
+        };
+
+        ConnectionFuture {
+            connect: dns_connect,
+            spawner: self.0.clone(),
         }
+    }
+}
+
+/// The variants of all supported connections for the Resolver
+#[allow(clippy::large_enum_variant, clippy::type_complexity)]
+pub(crate) enum ConnectionConnect<R: RuntimeProvider>
+where
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin,
+{
+    Udp(
+        DnsExchangeConnect<
+            UdpClientConnect<R::Udp>,
+            UdpClientStream<R::Udp>,
+            UdpResponse,
+            R::Timer,
+        >,
+    ),
+    Tcp(
+        DnsExchangeConnect<
+            DnsMultiplexerConnect<
+                TcpClientConnect<<<R as RuntimeProvider>::Tcp as Connect>::Transport>,
+                TcpClientStream<<<R as RuntimeProvider>::Tcp as Connect>::Transport>,
+                NoopMessageFinalizer,
+            >,
+            DnsMultiplexer<
+                TcpClientStream<<<R as RuntimeProvider>::Tcp as Connect>::Transport>,
+                NoopMessageFinalizer,
+            >,
+            DnsMultiplexerSerialResponse,
+            R::Timer,
+        >,
+    ),
+    #[cfg(feature = "dns-over-tls")]
+    Tls(
+        DnsExchangeConnect<
+            DnsMultiplexerConnect<
+                Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<
+                                    TcpClientStream<AsyncIo02As03<TokioTlsStream<TokioTcpStream>>>,
+                                    ProtoError,
+                                >,
+                            > + Send
+                            + 'static,
+                    >,
+                >,
+                TcpClientStream<AsyncIo02As03<TokioTlsStream<TokioTcpStream>>>,
+                NoopMessageFinalizer,
+            >,
+            DnsMultiplexer<
+                TcpClientStream<AsyncIo02As03<TokioTlsStream<TokioTcpStream>>>,
+                NoopMessageFinalizer,
+            >,
+            DnsMultiplexerSerialResponse,
+            TokioTime,
+        >,
+    ),
+    #[cfg(feature = "dns-over-https")]
+    Https(
+        DnsExchangeConnect<
+            HttpsClientConnect<R::Tcp>,
+            HttpsClientStream,
+            HttpsClientResponse,
+            TokioTime,
+        >,
+    ),
+    #[cfg(feature = "mdns")]
+    Mdns(
+        DnsExchangeConnect<
+            DnsMultiplexerConnect<MdnsClientConnect, MdnsClientStream, NoopMessageFinalizer>,
+            DnsMultiplexer<MdnsClientStream, NoopMessageFinalizer>,
+            DnsMultiplexerSerialResponse,
+            TokioTime,
+        >,
+    ),
+}
+
+/// Resolves to a new Connection
+#[must_use = "futures do nothing unless polled"]
+pub struct ConnectionFuture<R: RuntimeProvider>
+where
+    <R as RuntimeProvider>::Tcp: Connect,
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin,
+{
+    connect: ConnectionConnect<R>,
+    spawner: R::Handle,
+}
+
+impl<R: RuntimeProvider> Future for ConnectionFuture<R>
+where
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin,
+{
+    type Output = Result<GenericConnection, ProtoError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let (connection, bg) = match &mut self.connect {
+            ConnectionConnect::Udp(ref mut conn) => {
+                let (conn, bg) = ready!(conn.poll_unpin(cx))?;
+                let conn = GenericConnection(ConnectionConnected::Udp(conn));
+                let bg = ConnectionBackground::<R>(ConnectionBackgroundInner::Udp(bg));
+                (conn, bg)
+            }
+            ConnectionConnect::Tcp(ref mut conn) => {
+                let (conn, bg) = ready!(conn.poll_unpin(cx))?;
+                let conn = GenericConnection(ConnectionConnected::Tcp(conn));
+                let bg = ConnectionBackground::<R>(ConnectionBackgroundInner::Tcp(bg));
+                (conn, bg)
+            }
+            #[cfg(feature = "dns-over-tls")]
+            ConnectionConnect::Tls(ref mut conn) => {
+                let (conn, bg) = ready!(conn.poll_unpin(cx))?;
+                let conn = GenericConnection(ConnectionConnected::Tls(conn));
+                let bg = ConnectionBackground::<R>(ConnectionBackgroundInner::Tls(bg));
+                (conn, bg)
+            }
+            #[cfg(feature = "dns-over-https")]
+            ConnectionConnect::Https(ref mut conn) => {
+                let (conn, bg) = ready!(conn.poll_unpin(cx))?;
+                let conn = GenericConnection(ConnectionConnected::Https(conn));
+                let bg = ConnectionBackground::<R>(ConnectionBackgroundInner::Https(bg));
+                (conn, bg)
+            }
+            #[cfg(feature = "mdns")]
+            ConnectionConnect::Mdns(ref mut conn) => {
+                let (conn, bg) = ready!(conn.poll_unpin(cx))?;
+                let conn = GenericConnection(ConnectionConnected::Mdns(conn));
+                let bg = ConnectionBackground::<R>(ConnectionBackgroundInner::Mdns(bg));
+                (conn, bg)
+            }
+        };
+        self.spawner.spawn_bg(Box::pin(bg));
+        //spawn_bg(&self.spawner, bg);
+        Poll::Ready(Ok(connection))
+    }
+}
+
+/// A connected DNS handle
+#[derive(Clone)]
+pub struct GenericConnection(ConnectionConnected);
+
+impl DnsHandle for GenericConnection {
+    type Response = ConnectionResponse;
+
+    fn send<R: Into<DnsRequest> + Unpin + Send + 'static>(&mut self, request: R) -> Self::Response {
+        self.0.send(request)
     }
 }
 
 /// A representation of an established connection
 #[derive(Clone)]
-enum ConnectionHandleConnected {
-    Udp(xfer::BufDnsRequestStreamHandle<UdpResponse<TokioUdpSocket>>),
-    Tcp(xfer::BufDnsRequestStreamHandle<DnsMultiplexerSerialResponse>),
+enum ConnectionConnected {
+    Udp(DnsExchange<UdpResponse>),
+    Tcp(DnsExchange<DnsMultiplexerSerialResponse>),
+    #[cfg(feature = "dns-over-tls")]
+    Tls(DnsExchange<DnsMultiplexerSerialResponse>),
     #[cfg(feature = "dns-over-https")]
-    Https(xfer::BufDnsRequestStreamHandle<trust_dns_https::HttpsSerialResponse>),
+    Https(DnsExchange<HttpsClientResponse>),
+    #[cfg(feature = "mdns")]
+    Mdns(DnsExchange<DnsMultiplexerSerialResponse>),
 }
 
-impl DnsHandle for ConnectionHandleConnected {
-    type Response = ConnectionHandleResponseInner;
+impl DnsHandle for ConnectionConnected {
+    type Response = ConnectionResponse;
 
-    fn send<R: Into<DnsRequest>>(&mut self, request: R) -> ConnectionHandleResponseInner {
-        match self {
-            ConnectionHandleConnected::Udp(ref mut conn) => {
-                ConnectionHandleResponseInner::Udp(conn.send(request))
+    fn send<R: Into<DnsRequest> + Unpin + Send + 'static>(&mut self, request: R) -> Self::Response {
+        let response = match self {
+            ConnectionConnected::Udp(ref mut conn) => {
+                ConnectionResponseInner::Udp(conn.send(request))
             }
-            ConnectionHandleConnected::Tcp(ref mut conn) => {
-                ConnectionHandleResponseInner::Tcp(conn.send(request))
+            ConnectionConnected::Tcp(ref mut conn) => {
+                ConnectionResponseInner::Tcp(conn.send(request))
+            }
+            #[cfg(feature = "dns-over-tls")]
+            ConnectionConnected::Tls(ref mut conn) => {
+                ConnectionResponseInner::Tls(conn.send(request))
             }
             #[cfg(feature = "dns-over-https")]
-            ConnectionHandleConnected::Https(ref mut https) => {
-                ConnectionHandleResponseInner::Https(https.send(request))
+            ConnectionConnected::Https(ref mut https) => {
+                ConnectionResponseInner::Https(https.send(request))
             }
-        }
-    }
-}
+            #[cfg(feature = "mdns")]
+            ConnectionConnected::Mdns(ref mut mdns) => {
+                ConnectionResponseInner::Mdns(mdns.send(request))
+            }
+        };
 
-/// Allows us to wrap a connection that is either pending or already connected
-enum ConnectionHandleInner {
-    Connect(Option<ConnectionHandleConnect>),
-    Connected(ConnectionHandleConnected),
-}
-
-impl ConnectionHandleInner {
-    fn send<R: Into<DnsRequest>>(&mut self, request: R) -> ConnectionHandleResponseInner {
-        loop {
-            let connected: Result<ConnectionHandleConnected, proto::error::ProtoError> = match self
-            {
-                // still need to connect, drop through
-                ConnectionHandleInner::Connect(conn) => {
-                    conn.take().expect("already connected?").connect()
-                }
-                ConnectionHandleInner::Connected(conn) => return conn.send(request),
-            };
-
-            match connected {
-                Ok(connected) => *self = ConnectionHandleInner::Connected(connected),
-                Err(e) => return ConnectionHandleResponseInner::ProtoError(Some(e)),
-            };
-            // continue to return on send...
-        }
-    }
-}
-
-/// ConnectionHandle is used for sending DNS requests to a specific upstream DNS resolver
-#[derive(Clone)]
-pub struct ConnectionHandle(Arc<Mutex<ConnectionHandleInner>>);
-
-impl DnsHandle for ConnectionHandle {
-    type Response = ConnectionHandleResponse;
-
-    fn send<R: Into<DnsRequest>>(&mut self, request: R) -> ConnectionHandleResponse {
-        ConnectionHandleResponse(ConnectionHandleResponseInner::ConnectAndRequest {
-            conn: self.clone(),
-            request: Some(request.into()),
-        })
+        ConnectionResponse(response)
     }
 }
 
 /// A wrapper type to switch over a connection that still needs to be made, or is already established
 #[must_use = "futures do nothing unless polled"]
-enum ConnectionHandleResponseInner {
-    ConnectAndRequest {
-        conn: ConnectionHandle,
-        request: Option<DnsRequest>,
-    },
-    Udp(xfer::OneshotDnsResponseReceiver<UdpResponse<TokioUdpSocket>>),
-    Tcp(xfer::OneshotDnsResponseReceiver<DnsMultiplexerSerialResponse>),
+enum ConnectionResponseInner {
+    Udp(DnsExchangeSend<UdpResponse>),
+    Tcp(DnsExchangeSend<DnsMultiplexerSerialResponse>),
+    #[cfg(feature = "dns-over-tls")]
+    Tls(DnsExchangeSend<DnsMultiplexerSerialResponse>),
     #[cfg(feature = "dns-over-https")]
-    Https(xfer::OneshotDnsResponseReceiver<trust_dns_https::HttpsSerialResponse>),
-    ProtoError(Option<proto::error::ProtoError>),
+    Https(DnsExchangeSend<HttpsClientResponse>),
+    #[cfg(feature = "mdns")]
+    Mdns(DnsExchangeSend<DnsMultiplexerSerialResponse>),
 }
 
-impl Future for ConnectionHandleResponseInner {
-    type Item = DnsResponse;
-    type Error = proto::error::ProtoError;
+impl Future for ConnectionResponseInner {
+    type Output = Result<DnsResponse, proto::error::ProtoError>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        use self::ConnectionHandleResponseInner::*;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        use self::ConnectionResponseInner::*;
 
         trace!("polling response inner");
-        loop {
-            *self = match self {
-                // we still need to check the connection
-                ConnectAndRequest {
-                    ref conn,
-                    ref mut request,
-                } => match conn.0.lock() {
-                    Ok(mut c) => c.send(request.take().expect("already sent request?")),
-                    Err(e) => ProtoError(Some(proto::error::ProtoError::from(e))),
-                },
-                Udp(ref mut resp) => return resp.poll(),
-                Tcp(ref mut resp) => return resp.poll(),
-                #[cfg(feature = "dns-over-https")]
-                Https(ref mut https) => return https.poll(),
-                ProtoError(ref mut e) => {
-                    return Err(e.take().expect("futures cannot be polled once complete"));
-                }
-            };
-
-            // ok, connected, loop around and use poll the actual send request
+        match *self {
+            Udp(ref mut resp) => resp.poll_unpin(cx),
+            Tcp(ref mut resp) => resp.poll_unpin(cx),
+            #[cfg(feature = "dns-over-tls")]
+            Tls(ref mut tls) => tls.poll_unpin(cx),
+            #[cfg(feature = "dns-over-https")]
+            Https(ref mut https) => https.poll_unpin(cx),
+            #[cfg(feature = "mdns")]
+            Mdns(ref mut mdns) => mdns.poll_unpin(cx),
         }
     }
 }
 
 /// A future response from a DNS request.
 #[must_use = "futures do nothing unless polled"]
-pub struct ConnectionHandleResponse(ConnectionHandleResponseInner);
+pub struct ConnectionResponse(ConnectionResponseInner);
 
-impl Future for ConnectionHandleResponse {
-    type Item = DnsResponse;
-    type Error = proto::error::ProtoError;
+impl Future for ConnectionResponse {
+    type Output = Result<DnsResponse, proto::error::ProtoError>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.0.poll()
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        self.0.poll_unpin(cx)
     }
+}
+
+/// A background task for driving the DNS protocol of the connection
+#[must_use = "futures do nothing unless polled"]
+pub struct ConnectionBackground<R: RuntimeProvider>(ConnectionBackgroundInner<R>)
+where
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin;
+
+impl<R: RuntimeProvider> Future for ConnectionBackground<R>
+where
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin,
+{
+    type Output = Result<(), ProtoError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        self.0.poll_unpin(cx)
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+#[allow(clippy::type_complexity)]
+#[must_use = "futures do nothing unless polled"]
+pub(crate) enum ConnectionBackgroundInner<R: RuntimeProvider>
+where
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin,
+{
+    Udp(DnsExchangeBackground<UdpClientStream<R::Udp>, UdpResponse, R::Timer>),
+    Tcp(
+        DnsExchangeBackground<
+            DnsMultiplexer<
+                TcpClientStream<<<R as RuntimeProvider>::Tcp as Connect>::Transport>,
+                NoopMessageFinalizer,
+            >,
+            DnsMultiplexerSerialResponse,
+            R::Timer,
+        >,
+    ),
+    #[cfg(feature = "dns-over-tls")]
+    Tls(
+        DnsExchangeBackground<
+            DnsMultiplexer<
+                TcpClientStream<AsyncIo02As03<TokioTlsStream<TokioTcpStream>>>,
+                NoopMessageFinalizer,
+            >,
+            DnsMultiplexerSerialResponse,
+            TokioTime,
+        >,
+    ),
+    #[cfg(feature = "dns-over-https")]
+    Https(DnsExchangeBackground<HttpsClientStream, HttpsClientResponse, TokioTime>),
+    #[cfg(feature = "mdns")]
+    Mdns(
+        DnsExchangeBackground<
+            DnsMultiplexer<MdnsClientStream, NoopMessageFinalizer>,
+            DnsMultiplexerSerialResponse,
+            TokioTime,
+        >,
+    ),
+}
+
+impl<R: RuntimeProvider> Future for ConnectionBackgroundInner<R>
+where
+    <<R as RuntimeProvider>::Tcp as Connect>::Transport: Unpin,
+{
+    type Output = Result<(), ProtoError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        use self::ConnectionBackgroundInner::*;
+
+        trace!("polling response inner");
+        match *self {
+            Udp(ref mut bg) => bg.poll_unpin(cx),
+            Tcp(ref mut bg) => bg.poll_unpin(cx),
+            #[cfg(feature = "dns-over-tls")]
+            Tls(ref mut bg) => bg.poll_unpin(cx),
+            #[cfg(feature = "dns-over-https")]
+            Https(ref mut bg) => bg.poll_unpin(cx),
+            #[cfg(feature = "mdns")]
+            Mdns(ref mut bg) => bg.poll_unpin(cx),
+        }
+    }
+}
+
+#[cfg(feature = "tokio-runtime")]
+pub mod tokio_runtime {
+    use super::*;
+    use tokio::net::UdpSocket as TokioUdpSocket;
+
+    impl Spawn for tokio::runtime::Handle {
+        fn spawn_bg<F>(&mut self, future: F)
+        where
+            F: Future<Output = Result<(), ProtoError>> + Send + 'static,
+        {
+            let _join = self.spawn(future);
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct TokioRuntime;
+    impl RuntimeProvider for TokioRuntime {
+        type Handle = tokio::runtime::Handle;
+        type Tcp = AsyncIo02As03<TokioTcpStream>;
+        type Timer = TokioTime;
+        type Udp = TokioUdpSocket;
+    }
+    pub type TokioConnection = GenericConnection;
+    pub type TokioConnectionProvider = GenericConnectionProvider<TokioRuntime>;
 }

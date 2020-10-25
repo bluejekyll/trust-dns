@@ -8,24 +8,26 @@
 //! TlsClientStream for DNS over TLS
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 
-use futures::Future;
+use futures::{Future, TryFutureExt};
 use native_tls::Certificate;
 #[cfg(feature = "mtls")]
 use native_tls::Pkcs12;
-use tokio_tcp::TcpStream as TokioTcpStream;
+use tokio::net::TcpStream as TokioTcpStream;
 use tokio_tls::TlsStream as TokioTlsStream;
 
 use trust_dns_proto::error::ProtoError;
+use trust_dns_proto::iocompat::AsyncIo02As03;
 use trust_dns_proto::tcp::TcpClientStream;
 use trust_dns_proto::xfer::BufDnsStreamHandle;
 
-use TlsStreamBuilder;
+use crate::TlsStreamBuilder;
 
 /// TlsClientStream secure DNS over TCP stream
 ///
 /// See TlsClientStreamBuilder::new()
-pub type TlsClientStream = TcpClientStream<TokioTlsStream<TokioTcpStream>>;
+pub type TlsClientStream = TcpClientStream<AsyncIo02As03<TokioTlsStream<TokioTcpStream>>>;
 
 /// Builder for TlsClientStream
 pub struct TlsClientStreamBuilder(TlsStreamBuilder);
@@ -55,19 +57,20 @@ impl TlsClientStreamBuilder {
     ///
     /// * `name_server` - IP and Port for the remote DNS resolver
     /// * `dns_name` - The DNS name, Subject Public Key Info (SPKI) name, as associated to a certificate
+    #[allow(clippy::type_complexity)]
     pub fn build(
         self,
         name_server: SocketAddr,
         dns_name: String,
     ) -> (
-        Box<dyn Future<Item = TlsClientStream, Error = ProtoError> + Send>,
+        Pin<Box<dyn Future<Output = Result<TlsClientStream, ProtoError>> + Send>>,
         BufDnsStreamHandle,
     ) {
         let (stream_future, sender) = self.0.build(name_server, dns_name);
 
-        let new_future = Box::new(
+        let new_future = Box::pin(
             stream_future
-                .map(TcpClientStream::from_stream)
+                .map_ok(TcpClientStream::from_stream)
                 .map_err(ProtoError::from),
         );
 

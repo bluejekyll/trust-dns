@@ -6,33 +6,18 @@
 // copied, modified, or distributed except according to those terms.
 
 //! TLS protocol related components for DNS over TLS
-#![warn(missing_docs)]
-
-extern crate bytes;
-extern crate data_encoding;
-#[macro_use]
-extern crate futures;
-extern crate h2;
-extern crate http;
-#[macro_use]
-extern crate log;
-extern crate failure;
-extern crate rustls;
-extern crate tokio_executor;
-extern crate tokio_reactor;
-extern crate tokio_rustls;
-extern crate tokio_tcp;
-extern crate trust_dns_proto;
-extern crate trust_dns_rustls;
-extern crate typed_headers;
-extern crate webpki;
-extern crate webpki_roots;
+#![warn(
+    missing_docs,
+    clippy::dbg_macro,
+    clippy::print_stdout,
+    clippy::unimplemented
+)]
+#![allow(clippy::single_component_path_imports)]
 
 const MIME_APPLICATION: &str = "application";
 const MIME_DNS_BINARY: &str = "dns-message";
 const MIME_APPLICATION_DNS: &str = "application/dns-message";
 const DNS_QUERY_PATH: &str = "/dns-query";
-const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 //pub mod https_client_connection;
 mod error;
@@ -42,10 +27,12 @@ pub mod request;
 pub mod response;
 //pub mod https_stream;
 
+pub use trust_dns_proto as proto;
+
 pub use self::error::{Error as HttpsError, Result as HttpsResult};
 
 //pub use self::https_client_connection::{HttpsClientConnection, HttpsClientConnectionBuilder};
 pub use self::https_client_stream::{
-    HttpsClientConnect, HttpsClientStream, HttpsClientStreamBuilder, HttpsSerialResponse,
+    HttpsClientConnect, HttpsClientResponse, HttpsClientStream, HttpsClientStreamBuilder,
 };
 //pub use self::https_stream::{HttpsStream, HttpsStreamBuilder};

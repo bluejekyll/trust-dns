@@ -9,30 +9,30 @@
 #[cfg(any(feature = "openssl", feature = "ring"))]
 use chrono::Duration;
 
-use proto::error::{ProtoErrorKind, ProtoResult};
+use crate::proto::error::{ProtoErrorKind, ProtoResult};
 #[cfg(feature = "dnssec")]
-use proto::rr::dnssec::{tbs, TBS};
+use crate::proto::rr::dnssec::{tbs, TBS};
 
 #[cfg(feature = "dnssec")]
-use error::DnsSecResult;
-use op::{Message, MessageFinalizer};
+use crate::error::DnsSecResult;
+use crate::op::{Message, MessageFinalizer};
 #[cfg(feature = "dnssec")]
-use rr::dnssec::Private;
+use crate::rr::dnssec::Private;
 #[cfg(feature = "dnssec")]
-use rr::dnssec::{Algorithm, KeyPair};
+use crate::rr::dnssec::{Algorithm, KeyPair};
 #[cfg(feature = "dnssec")]
-use rr::rdata::DNSSECRData;
+use crate::rr::rdata::DNSSECRData;
 #[cfg(feature = "dnssec")]
-use rr::rdata::SIG;
+use crate::rr::rdata::SIG;
 #[cfg(feature = "dnssec")]
-use rr::rdata::{DNSSECRecordType, DNSKEY, KEY};
+use crate::rr::rdata::{DNSSECRecordType, DNSKEY, KEY};
 #[cfg(feature = "dnssec")]
-use rr::RData;
-use rr::Record;
+use crate::rr::RData;
+use crate::rr::Record;
 #[cfg(feature = "dnssec")]
-use rr::{DNSClass, Name, RecordType};
+use crate::rr::{DNSClass, Name, RecordType};
 #[cfg(feature = "dnssec")]
-use serialize::binary::BinEncoder;
+use crate::serialize::binary::BinEncoder;
 
 /// Use for performing signing and validation of DNSSec based components.
 ///
@@ -518,7 +518,7 @@ impl Signer {
 impl MessageFinalizer for Signer {
     #[cfg(any(feature = "openssl", feature = "ring"))]
     fn finalize_message(&self, message: &Message, current_time: u32) -> ProtoResult<Vec<Record>> {
-        debug!("signing message: {:?}", message);
+        log::debug!("signing message: {:?}", message);
         let key_tag: u16 = self.calculate_key_tag()?;
 
         // this is based on RFCs 2535, 2931 and 3007
@@ -575,16 +575,17 @@ impl MessageFinalizer for Signer {
 #[cfg(test)]
 #[cfg(feature = "openssl")]
 mod tests {
-    extern crate openssl;
-    use self::openssl::bn::BigNum;
-    use self::openssl::pkey::Private;
-    use self::openssl::rsa::Rsa;
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
 
-    use op::{Message, Query};
-    use rr::dnssec::*;
-    use rr::rdata::key::KeyUsage;
-    use rr::rdata::{DNSSECRData, SIG};
-    use rr::{DNSClass, Name, Record, RecordType};
+    use openssl::bn::BigNum;
+    use openssl::pkey::Private;
+    use openssl::rsa::Rsa;
+
+    use crate::op::{Message, Query};
+    use crate::rr::dnssec::*;
+    use crate::rr::rdata::key::KeyUsage;
+    use crate::rr::rdata::{DNSSECRData, SIG};
+    use crate::rr::{DNSClass, Name, Record, RecordType};
 
     pub use super::*;
 
@@ -620,7 +621,7 @@ mod tests {
         let origin: Name = Name::parse("example.com.", None).unwrap();
         let mut question: Message = Message::new();
         let mut query: Query = Query::new();
-        query.set_name(origin.clone());
+        query.set_name(origin);
         question.add_query(query);
 
         let rsa = Rsa::generate(2048).unwrap();
@@ -686,7 +687,7 @@ mod tests {
                 .set_rdata(RData::NS(Name::parse("a.iana-servers.net.", None).unwrap()))
                 .clone(),
             Record::new()
-                .set_name(origin.clone())
+                .set_name(origin)
                 .set_ttl(86400)
                 .set_rr_type(RecordType::NS)
                 .set_dns_class(DNSClass::IN)
@@ -775,13 +776,12 @@ MC0CAQACBQC+L6pNAgMBAAECBQCYj0ZNAgMA9CsCAwDHZwICeEUCAnE/AgMA3u0=
     #[allow(clippy::module_inception)]
     #[cfg(test)]
     mod tests {
-        extern crate openssl;
-        use self::openssl::rsa::Rsa;
+        use openssl::rsa::Rsa;
 
-        use rr::dnssec::tbs::*;
-        use rr::dnssec::*;
-        use rr::rdata::{DNSSECRData, SIG};
-        use rr::*;
+        use crate::rr::dnssec::tbs::*;
+        use crate::rr::dnssec::*;
+        use crate::rr::rdata::{DNSSECRData, SIG};
+        use crate::rr::*;
 
         #[test]
         fn test_rrset_tbs() {
@@ -860,7 +860,7 @@ MC0CAQACBQC+L6pNAgMBAAECBQCYj0ZNAgMA9CsCAwDHZwICeEUCAnE/AgMA3u0=
                     .set_rdata(RData::NS(Name::parse("a.iana-servers.net.", None).unwrap()))
                     .clone(),
                 Record::new()
-                    .set_name(origin.clone())
+                    .set_name(origin)
                     .set_ttl(86400)
                     .set_rr_type(RecordType::NS)
                     .set_dns_class(DNSClass::IN)

@@ -5,42 +5,60 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use std::sync::{Arc, Mutex, TryLockError};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use futures::future::Loop;
-use futures::{future, task, Async, Future, IntoFuture, Poll};
+use futures_util::{future, future::Future, TryFutureExt};
 use smallvec::SmallVec;
+#[cfg(test)]
+#[cfg(feature = "tokio-runtime")]
+use tokio::runtime::Handle;
 
 use proto::error::ProtoError;
 use proto::op::ResponseCode;
 use proto::xfer::{DnsHandle, DnsRequest, DnsResponse};
 
-use config::{ResolverConfig, ResolverOpts};
+use crate::config::{ResolverConfig, ResolverOpts};
 #[cfg(feature = "mdns")]
-use name_server;
-use name_server::{ConnectionHandle, ConnectionProvider, NameServer, StandardConnection};
+use crate::name_server;
+use crate::name_server::{ConnectionProvider, NameServer};
+#[cfg(test)]
+#[cfg(feature = "tokio-runtime")]
+use crate::name_server::{TokioConnection, TokioConnectionProvider};
 
 /// A pool of NameServers
 ///
 /// This is not expected to be used directly, see [`AsyncResolver`].
 #[derive(Clone)]
-pub struct NameServerPool<C: DnsHandle + 'static, P: ConnectionProvider<ConnHandle = C> + 'static> {
+pub struct NameServerPool<
+    C: DnsHandle + Send + Sync + 'static,
+    P: ConnectionProvider<Conn = C> + Send + 'static,
+> {
     // TODO: switch to FuturesMutex (Mutex will have some undesireable locking)
-    datagram_conns: Arc<Mutex<Vec<NameServer<C, P>>>>, /* All NameServers must be the same type */
-    stream_conns: Arc<Mutex<Vec<NameServer<C, P>>>>,   /* All NameServers must be the same type */
+    datagram_conns: Arc<Vec<NameServer<C, P>>>, /* All NameServers must be the same type */
+    stream_conns: Arc<Vec<NameServer<C, P>>>,   /* All NameServers must be the same type */
     #[cfg(feature = "mdns")]
     mdns_conns: NameServer<C, P>, /* All NameServers must be the same type */
     options: ResolverOpts,
     conn_provider: P,
 }
 
-impl NameServerPool<ConnectionHandle, StandardConnection> {
-    pub(crate) fn from_config(config: &ResolverConfig, options: &ResolverOpts) -> Self {
-        Self::from_config_with_provider(config, options, StandardConnection)
+#[cfg(test)]
+#[cfg(feature = "tokio-runtime")]
+impl NameServerPool<TokioConnection, TokioConnectionProvider> {
+    pub(crate) fn from_config(
+        config: &ResolverConfig,
+        options: &ResolverOpts,
+        runtime: Handle,
+    ) -> Self {
+        Self::from_config_with_provider(config, options, TokioConnectionProvider::new(runtime))
     }
 }
 
-impl<C: DnsHandle + 'static, P: ConnectionProvider<ConnHandle = C> + 'static> NameServerPool<C, P> {
+impl<C: DnsHandle + Sync + 'static, P: ConnectionProvider<Conn = C> + 'static>
+    NameServerPool<C, P>
+{
     pub(crate) fn from_config_with_provider(
         config: &ResolverConfig,
         options: &ResolverOpts,
@@ -51,11 +69,16 @@ impl<C: DnsHandle + 'static, P: ConnectionProvider<ConnHandle = C> + 'static> Na
             .iter()
             .filter(|ns_config| ns_config.protocol.is_datagram())
             .map(|ns_config| {
-                NameServer::<C, P>::new_with_provider(
-                    ns_config.clone(),
-                    *options,
-                    conn_provider.clone(),
-                )
+                #[cfg(feature = "dns-over-rustls")]
+                let ns_config = {
+                    let mut ns_config = ns_config.clone();
+                    ns_config.tls_config = config.client_config().clone();
+                    ns_config
+                };
+                #[cfg(not(feature = "dns-over-rustls"))]
+                let ns_config = { ns_config.clone() };
+
+                NameServer::<C, P>::new_with_provider(ns_config, *options, conn_provider.clone())
             })
             .collect();
 
@@ -64,17 +87,22 @@ impl<C: DnsHandle + 'static, P: ConnectionProvider<ConnHandle = C> + 'static> Na
             .iter()
             .filter(|ns_config| ns_config.protocol.is_stream())
             .map(|ns_config| {
-                NameServer::<C, P>::new_with_provider(
-                    ns_config.clone(),
-                    *options,
-                    conn_provider.clone(),
-                )
+                #[cfg(feature = "dns-over-rustls")]
+                let ns_config = {
+                    let mut ns_config = ns_config.clone();
+                    ns_config.tls_config = config.client_config().clone();
+                    ns_config
+                };
+                #[cfg(not(feature = "dns-over-rustls"))]
+                let ns_config = { ns_config.clone() };
+
+                NameServer::<C, P>::new_with_provider(ns_config, *options, conn_provider.clone())
             })
             .collect();
 
         NameServerPool {
-            datagram_conns: Arc::new(Mutex::new(datagram_conns)),
-            stream_conns: Arc::new(Mutex::new(stream_conns)),
+            datagram_conns: Arc::new(datagram_conns),
+            stream_conns: Arc::new(stream_conns),
             #[cfg(feature = "mdns")]
             mdns_conns: name_server::mdns_nameserver(*options, conn_provider.clone()),
             options: *options,
@@ -91,8 +119,8 @@ impl<C: DnsHandle + 'static, P: ConnectionProvider<ConnHandle = C> + 'static> Na
         conn_provider: P,
     ) -> Self {
         NameServerPool {
-            datagram_conns: Arc::new(Mutex::new(datagram_conns.into_iter().collect())),
-            stream_conns: Arc::new(Mutex::new(stream_conns.into_iter().collect())),
+            datagram_conns: Arc::new(datagram_conns.into_iter().collect()),
+            stream_conns: Arc::new(stream_conns.into_iter().collect()),
             options: *options,
             conn_provider,
         }
@@ -108,33 +136,71 @@ impl<C: DnsHandle + 'static, P: ConnectionProvider<ConnHandle = C> + 'static> Na
         conn_provider: P,
     ) -> Self {
         NameServerPool {
-            datagram_conns: Arc::new(Mutex::new(datagram_conns.into_iter().collect())),
-            stream_conns: Arc::new(Mutex::new(stream_conns.into_iter().collect())),
+            datagram_conns: Arc::new(datagram_conns.into_iter().collect()),
+            stream_conns: Arc::new(stream_conns.into_iter().collect()),
             mdns_conns,
             options: *options,
             conn_provider,
         }
     }
 
-    fn try_send(
-        opts: ResolverOpts,
-        conns: Arc<Mutex<Vec<NameServer<C, P>>>>,
-        request: DnsRequest,
-    ) -> TrySend<C, P> {
-        TrySend::Lock {
-            opts,
-            conns,
-            request: Some(request),
+    #[cfg(test)]
+    #[cfg(not(feature = "mdns"))]
+    fn from_nameservers_test(
+        options: &ResolverOpts,
+        datagram_conns: Arc<Vec<NameServer<C, P>>>,
+        stream_conns: Arc<Vec<NameServer<C, P>>>,
+        conn_provider: P,
+    ) -> Self {
+        NameServerPool {
+            datagram_conns,
+            stream_conns,
+            options: *options,
+            conn_provider,
         }
+    }
+
+    #[cfg(test)]
+    #[cfg(feature = "mdns")]
+    fn from_nameservers_test(
+        options: &ResolverOpts,
+        datagram_conns: Arc<Vec<NameServer<C, P>>>,
+        stream_conns: Arc<Vec<NameServer<C, P>>>,
+        mdns_conns: NameServer<C, P>,
+        conn_provider: P,
+    ) -> Self {
+        NameServerPool {
+            datagram_conns,
+            stream_conns,
+            mdns_conns,
+            options: *options,
+            conn_provider,
+        }
+    }
+
+    async fn try_send(
+        opts: ResolverOpts,
+        conns: Arc<Vec<NameServer<C, P>>>,
+        request: DnsRequest,
+    ) -> Result<DnsResponse, ProtoError> {
+        let mut conns: Vec<NameServer<C, P>> = conns.to_vec();
+
+        // select the highest priority connection
+        //   reorder the connections based on current view...
+        //   this reorders the inner set
+        conns.sort_unstable();
+        let request_loop = request.clone();
+
+        parallel_conn_loop(conns, request_loop, opts).await
     }
 }
 
 impl<C, P> DnsHandle for NameServerPool<C, P>
 where
-    C: DnsHandle + 'static,
-    P: ConnectionProvider<ConnHandle = C> + 'static,
+    C: DnsHandle + Sync + 'static,
+    P: ConnectionProvider<Conn = C> + 'static,
 {
-    type Response = Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>;
+    type Response = Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>>;
 
     fn send<R: Into<DnsRequest>>(&mut self, request: R) -> Self::Response {
         let opts = self.options;
@@ -163,17 +229,20 @@ where
 
         // it wasn't a local query, continue with standard lookup path
         let request = mdns.take_request();
-        Box::new(
-            // First try the UDP connections
+
+        debug!("sending request: {:?}", request.queries());
+        // First try the UDP connections
+        Box::pin(
             Self::try_send(opts, datagram_conns, request)
                 .and_then(move |response| {
                     // handling promotion from datagram to stream base on truncation in message
                     if ResponseCode::NoError == response.response_code() && response.truncated() {
                         // TCP connections should not truncate
-                        future::Either::A(Self::try_send(opts, stream_conns1, tcp_message1))
+                        future::Either::Left(Self::try_send(opts, stream_conns1, tcp_message1))
                     } else {
+                        debug!("mDNS responsed for query: {:?}", response.response_code());
                         // Return the result from the UDP connection
-                        future::Either::B(future::ok(response))
+                        future::Either::Right(future::ok(response))
                     }
                 })
                 // if UDP fails, try TCP
@@ -182,114 +251,46 @@ where
     }
 }
 
-#[allow(clippy::large_enum_variant)]
-enum TrySend<C: DnsHandle + 'static, P: ConnectionProvider<ConnHandle = C> + 'static> {
-    Lock {
-        opts: ResolverOpts,
-        conns: Arc<Mutex<Vec<NameServer<C, P>>>>,
-        request: Option<DnsRequest>,
-    },
-    DoSend(Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>),
-}
-
-impl<C, P> Future for TrySend<C, P>
+// TODO: we should be able to have a self-referential future here with Pin and not require cloned conns
+/// An async function that will loop over all the conns with a max parallel request count of ops.num_concurrent_req
+async fn parallel_conn_loop<C, P>(
+    mut conns: Vec<NameServer<C, P>>,
+    request: DnsRequest,
+    opts: ResolverOpts,
+) -> Result<DnsResponse, ProtoError>
 where
     C: DnsHandle + 'static,
-    P: ConnectionProvider<ConnHandle = C> + 'static,
+    P: ConnectionProvider<Conn = C> + 'static,
 {
-    type Item = DnsResponse;
-    type Error = ProtoError;
+    let mut err = ProtoError::from("No connections available");
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        // TODO: this resolves an odd unsized issue with the loop_fn future
-        let future;
+    loop {
+        let request_cont = request.clone();
 
-        match *self {
-            TrySend::Lock {
-                ref opts,
-                ref conns,
-                ref mut request,
-            } => {
-                // pull a lock on the shared connections, lock releases at the end of the method
-                let conns = conns.try_lock();
-                match conns {
-                    Err(TryLockError::Poisoned(_)) => {
-                        // TODO: what to do on poisoned errors? this is non-recoverable, right?
-                        return Err(ProtoError::from("Lock Poisoned"));
-                    }
-                    Err(TryLockError::WouldBlock) => {
-                        // since there is nothing registered with Tokio, we need to yield...
-                        task::current().notify();
-                        return Ok(Async::NotReady);
-                    }
-                    Ok(mut conns) => {
-                        let opts = *opts;
-
-                        // select the highest priority connection
-                        //   reorder the connections based on current view...
-                        //   this reorders the inner set
-                        conns.sort_unstable();
-
-                        // TODO: restrict this size to a maximum # of NameServers to try
-                        // get a stable view for trying all connections
-                        //   we split into chunks of the number of parallel requests to issue
-                        let conns: Vec<NameServer<C, P>> = conns.clone();
-                        let request = request.take();
-                        let request = request.expect("bad state, message should never be None");
-                        let request_loop = request.clone();
-
-                        let loop_future = future::loop_fn(
-                            (
-                                conns,
-                                request_loop,
-                                ProtoError::from("No connections available"),
-                            ),
-                            move |(mut conns, request, err)| {
-                                let request_cont = request.clone();
-
-                                // construct the parallel requests, 2 is the default
-                                let mut par_conns = SmallVec::<[NameServer<C, P>; 2]>::new();
-                                let count = conns.len().min(opts.num_concurrent_reqs.max(1));
-                                for conn in conns.drain(..count) {
-                                    par_conns.push(conn);
-                                }
-
-                                // construct the requests to send
-                                let requests = if par_conns.is_empty() {
-                                    None
-                                } else {
-                                    Some(
-                                        par_conns
-                                            .into_iter()
-                                            .map(move |mut conn| conn.send(request.clone())),
-                                    )
-                                };
-
-                                // execute all the requests
-                                requests.ok_or_else(move || err).into_future().and_then(
-                                    |requests| {
-                                        futures::select_ok(requests)
-                                            .and_then(|(sent, _)| Ok(Loop::Break(sent)))
-                                            .or_else(move |err| {
-                                                Ok(Loop::Continue((conns, request_cont, err)))
-                                            })
-                                    },
-                                )
-                            },
-                        );
-
-                        future = Box::new(loop_future);
-                    }
-                }
-            }
-            TrySend::DoSend(ref mut future) => return future.poll(),
+        // construct the parallel requests, 2 is the default
+        let mut par_conns = SmallVec::<[NameServer<C, P>; 2]>::new();
+        let count = conns.len().min(opts.num_concurrent_reqs.max(1));
+        for conn in conns.drain(..count) {
+            par_conns.push(conn);
         }
 
-        // can only get here if we were in the TrySend::Lock state
-        *self = TrySend::DoSend(future);
+        // construct the requests to send
+        let requests = if par_conns.is_empty() {
+            return Err(err);
+        } else {
+            par_conns
+                .into_iter()
+                .map(move |mut conn| conn.send(request_cont.clone()))
+        };
 
-        task::current().notify();
-        Ok(Async::NotReady)
+        match future::select_ok(requests).await {
+            Ok((sent, _)) => return Ok(sent),
+            // consider a debug msg here
+            Err(e) => {
+                err = e;
+                continue;
+            }
+        };
     }
 }
 
@@ -304,7 +305,8 @@ mod mdns {
     pub fn maybe_local<C, P>(name_server: &mut NameServer<C, P>, request: DnsRequest) -> Local
     where
         C: DnsHandle + 'static,
-        P: ConnectionProvider<ConnHandle = C> + 'static,
+        P: ConnectionProvider<Conn = C> + 'static,
+        P: ConnectionProvider,
     {
         if request
             .queries()
@@ -320,7 +322,7 @@ mod mdns {
 
 pub enum Local {
     #[allow(dead_code)]
-    ResolveFuture(Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>),
+    ResolveFuture(Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>>),
     NotMdns(DnsRequest),
 }
 
@@ -338,7 +340,7 @@ impl Local {
     /// # Panics
     ///
     /// Panics if this is in fact a Local::NotMdns
-    fn take_future(self) -> Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send> {
+    fn take_future(self) -> Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>> {
         match self {
             Local::ResolveFuture(future) => future,
             _ => panic!("non Local queries have no future, see take_message()"),
@@ -359,36 +361,34 @@ impl Local {
 }
 
 impl Future for Local {
-    type Item = DnsResponse;
-    type Error = ProtoError;
+    type Output = Result<DnsResponse, ProtoError>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         match *self {
-                Local::ResolveFuture(ref mut ns) => ns.poll(),
-                // TODO: making this a panic for now
-                Local::NotMdns(..) => {
-                    panic!("Local queries that are not mDNS should not be polled")
-                }
-                //Local::NotMdns(message) => return Err(ResolveErrorKind::Message("not mDNS")),
-            }
+            Local::ResolveFuture(ref mut ns) => ns.as_mut().poll(cx),
+            // TODO: making this a panic for now
+            Local::NotMdns(..) => panic!("Local queries that are not mDNS should not be polled"), //Local::NotMdns(message) => return Err(ResolveErrorKind::Message("not mDNS")),
+        }
     }
 }
 
 #[cfg(test)]
+#[cfg(feature = "tokio-runtime")]
 mod tests {
     extern crate env_logger;
 
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::str::FromStr;
 
-    use tokio::runtime::current_thread::Runtime;
+    use tokio::runtime::Runtime;
 
     use proto::op::Query;
     use proto::rr::{Name, RecordType};
     use proto::xfer::{DnsHandle, DnsRequestOptions};
 
     use super::*;
-    use config::NameServerConfig;
-    use config::Protocol;
+    use crate::config::NameServerConfig;
+    use crate::config::Protocol;
 
     #[ignore]
     // because of there is a real connection that needs a reasonable timeout
@@ -398,12 +398,16 @@ mod tests {
             socket_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 252)), 253),
             protocol: Protocol::Udp,
             tls_dns_name: None,
+            #[cfg(feature = "dns-over-rustls")]
+            tls_config: None,
         };
 
         let config2 = NameServerConfig {
             socket_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
             protocol: Protocol::Udp,
             tls_dns_name: None,
+            #[cfg(feature = "dns-over-rustls")]
+            tls_config: None,
         };
 
         let mut resolver_config = ResolverConfig::new();
@@ -411,9 +415,10 @@ mod tests {
         resolver_config.add_name_server(config2);
 
         let mut io_loop = Runtime::new().unwrap();
-        let mut pool = NameServerPool::<_, StandardConnection>::from_config(
+        let mut pool = NameServerPool::<_, TokioConnectionProvider>::from_config(
             &resolver_config,
             &ResolverOpts::default(),
+            io_loop.handle().clone(),
         );
 
         let name = Name::parse("www.example.com.", None).unwrap();
@@ -444,5 +449,79 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_multi_use_conns() {
+        env_logger::try_init().ok();
+
+        let mut io_loop = Runtime::new().unwrap();
+        let conn_provider = TokioConnectionProvider::new(io_loop.handle().clone());
+
+        let tcp = NameServerConfig {
+            socket_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
+            protocol: Protocol::Tcp,
+            tls_dns_name: None,
+            #[cfg(feature = "dns-over-rustls")]
+            tls_config: None,
+        };
+
+        let opts = ResolverOpts::default();
+        let ns_config = { tcp };
+        let name_server = NameServer::new_with_provider(ns_config, opts, conn_provider.clone());
+        let name_servers = Arc::new(vec![name_server]);
+
+        let mut pool = NameServerPool::from_nameservers_test(
+            &opts,
+            Arc::new(vec![]),
+            Arc::clone(&name_servers),
+            #[cfg(feature = "mdns")]
+            name_server::mdns_nameserver(opts, conn_provider.clone()),
+            conn_provider,
+        );
+
+        let name = Name::from_str("www.example.com.").unwrap();
+
+        // first lookup
+        let response = io_loop
+            .block_on(pool.lookup(
+                Query::query(name.clone(), RecordType::A),
+                DnsRequestOptions::default(),
+            ))
+            .expect("lookup failed");
+
+        assert_eq!(
+            *response.answers()[0]
+                .rdata()
+                .as_a()
+                .expect("no a record available"),
+            Ipv4Addr::new(93, 184, 216, 34)
+        );
+
+        assert!(
+            name_servers[0].is_connected(),
+            "if this is failing then the NameServers aren't being properly shared."
+        );
+
+        // first lookup
+        let response = io_loop
+            .block_on(pool.lookup(
+                Query::query(name, RecordType::AAAA),
+                DnsRequestOptions::default(),
+            ))
+            .expect("lookup failed");
+
+        assert_eq!(
+            *response.answers()[0]
+                .rdata()
+                .as_aaaa()
+                .expect("no aaaa record available"),
+            Ipv6Addr::new(0x2606, 0x2800, 0x0220, 0x0001, 0x0248, 0x1893, 0x25c8, 0x1946)
+        );
+
+        assert!(
+            name_servers[0].is_connected(),
+            "if this is failing then the NameServers aren't being properly shared."
+        );
     }
 }

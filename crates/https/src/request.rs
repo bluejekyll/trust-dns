@@ -10,13 +10,14 @@
 use std::str::FromStr;
 
 use http::{header, uri, Method, Request, Uri, Version};
+use log::debug;
 use typed_headers::{
     mime::Mime, Accept, ContentLength, ContentType, HeaderMapExt, Quality, QualityItem,
 };
 
 use trust_dns_proto::error::ProtoError;
 
-use HttpsResult;
+use crate::HttpsResult;
 
 /// Create a new Request for an http/2 dns-message request
 ///
@@ -42,7 +43,7 @@ pub fn new(name_server_name: &str, message_len: usize) -> HttpsResult<Request<()
     //     .body(());
 
     let mut parts = uri::Parts::default();
-    parts.path_and_query = Some(uri::PathAndQuery::from_static(::DNS_QUERY_PATH));
+    parts.path_and_query = Some(uri::PathAndQuery::from_static(crate::DNS_QUERY_PATH));
     parts.scheme = Some(uri::Scheme::HTTPS);
     parts.authority = Some(
         uri::Authority::from_str(&name_server_name)
@@ -52,13 +53,12 @@ pub fn new(name_server_name: &str, message_len: usize) -> HttpsResult<Request<()
     let url =
         Uri::from_parts(parts).map_err(|e| ProtoError::from(format!("uri parse error: {}", e)))?;
 
-    let accepts_dns = Mime::from_str(::MIME_APPLICATION_DNS).unwrap();
+    let accepts_dns = Mime::from_str(crate::MIME_APPLICATION_DNS).unwrap();
     let content_type = ContentType(accepts_dns.clone());
     let accept = Accept(vec![QualityItem::new(accepts_dns, Quality::from_u16(1000))]);
 
     // TODO: add user agent to TypedHeaders
     let mut request = Request::post(url)
-        .header(header::USER_AGENT, ::USER_AGENT)
         .version(Version::HTTP_2)
         .body(())
         .map_err(|e| ProtoError::from(format!("h2 stream errored: {}", e)))?;
@@ -82,17 +82,22 @@ pub fn verify<T>(name_server: &str, request: &Request<T>) -> HttpsResult<()> {
     let uri = request.uri();
 
     // validate path
-    if uri.path() != ::DNS_QUERY_PATH {
-        return Err(format!("bad path: {}, expected: {}", uri.path(), ::DNS_QUERY_PATH).into());
+    if uri.path() != crate::DNS_QUERY_PATH {
+        return Err(format!(
+            "bad path: {}, expected: {}",
+            uri.path(),
+            crate::DNS_QUERY_PATH
+        )
+        .into());
     }
 
     // we only accept HTTPS
-    if Some(&uri::Scheme::HTTPS) != uri.scheme_part() {
+    if Some(&uri::Scheme::HTTPS) != uri.scheme() {
         return Err("must be HTTPS scheme".into());
     }
 
     // the authority must match our nameserver name
-    if let Some(authority) = uri.authority_part() {
+    if let Some(authority) = uri.authority() {
         if authority.host() != name_server {
             return Err("incorrect authority".into());
         }
@@ -105,7 +110,7 @@ pub fn verify<T>(name_server: &str, request: &Request<T>) -> HttpsResult<()> {
 
     // TODO: switch to mime::APPLICATION_DNS when that stabilizes
     if !content_type
-        .map(|c| (c.type_() == ::MIME_APPLICATION && c.subtype() == ::MIME_DNS_BINARY))
+        .map(|c| (c.type_() == crate::MIME_APPLICATION && c.subtype() == crate::MIME_DNS_BINARY))
         .unwrap_or(true)
     {
         return Err("unsupported content type".into());
@@ -113,11 +118,12 @@ pub fn verify<T>(name_server: &str, request: &Request<T>) -> HttpsResult<()> {
 
     let accept = accept.ok_or_else(|| "Accept is unspecified")?;
 
+    let any_application_and_dns = |q: &QualityItem<Mime>| -> bool {
+        q.item.type_() == crate::MIME_APPLICATION && q.item.subtype() == crate::MIME_DNS_BINARY
+    };
+
     // TODO: switch to mime::APPLICATION_DNS when that stabilizes
-    if !accept
-        .iter()
-        .any(|q| (q.item.type_() == ::MIME_APPLICATION && q.item.subtype() == ::MIME_DNS_BINARY))
-    {
+    if !accept.iter().any(any_application_and_dns) {
         return Err("does not accept content type".into());
     }
 

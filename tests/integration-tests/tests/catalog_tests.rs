@@ -1,17 +1,17 @@
 extern crate futures;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_integration;
 extern crate trust_dns_server;
 
 use std::net::*;
 use std::str::FromStr;
 
-use futures::Future;
+use futures::executor::block_on;
 
-use trust_dns::op::*;
-use trust_dns::rr::rdata::*;
-use trust_dns::rr::*;
-use trust_dns::serialize::binary::{BinDecodable, BinEncodable};
+use trust_dns_client::op::*;
+use trust_dns_client::rr::rdata::*;
+use trust_dns_client::rr::*;
+use trust_dns_client::serialize::binary::{BinDecodable, BinEncodable};
 
 use trust_dns_server::authority::{Authority, Catalog, MessageRequest, ZoneType};
 use trust_dns_server::store::in_memory::InMemoryAuthority;
@@ -77,7 +77,7 @@ pub fn create_test() -> InMemoryAuthority {
     );
     records.upsert(
         Record::new()
-            .set_name(origin.clone())
+            .set_name(origin)
             .set_ttl(86400)
             .set_rr_type(RecordType::AAAA)
             .set_dns_class(DNSClass::IN)
@@ -101,7 +101,7 @@ pub fn create_test() -> InMemoryAuthority {
     );
     records.upsert(
         Record::new()
-            .set_name(www_name.clone())
+            .set_name(www_name)
             .set_ttl(86400)
             .set_rr_type(RecordType::AAAA)
             .set_dns_class(DNSClass::IN)
@@ -129,7 +129,7 @@ fn test_catalog_lookup() {
     let mut question: Message = Message::new();
 
     let mut query: Query = Query::new();
-    query.set_name(origin.clone().into());
+    query.set_name(origin.into());
 
     question.add_query(query);
 
@@ -138,11 +138,8 @@ fn test_catalog_lookup() {
     let question_req = MessageRequest::from_bytes(&question_bytes).unwrap();
 
     let response_handler = TestResponseHandler::new();
-    catalog
-        .lookup(question_req, None, response_handler.clone())
-        .wait()
-        .unwrap();
-    let result = response_handler.into_message().wait().unwrap();
+    block_on(catalog.lookup(question_req, None, response_handler.clone()));
+    let result = block_on(response_handler.into_message());
 
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.message_type(), MessageType::Response);
@@ -173,7 +170,7 @@ fn test_catalog_lookup() {
 
     // other zone
     let mut query: Query = Query::new();
-    query.set_name(test_origin.clone().into());
+    query.set_name(test_origin.into());
 
     question.add_query(query);
 
@@ -182,11 +179,8 @@ fn test_catalog_lookup() {
     let question_req = MessageRequest::from_bytes(&question_bytes).unwrap();
 
     let response_handler = TestResponseHandler::new();
-    catalog
-        .lookup(question_req, None, response_handler.clone())
-        .wait()
-        .unwrap();
-    let result = response_handler.into_message().wait().unwrap();
+    block_on(catalog.lookup(question_req, None, response_handler.clone()));
+    let result = block_on(response_handler.into_message());
 
     assert_eq!(result.response_code(), ResponseCode::NoError);
     assert_eq!(result.message_type(), MessageType::Response);
@@ -208,7 +202,7 @@ fn test_catalog_nx_soa() {
     let origin = example.origin().clone();
 
     let mut catalog: Catalog = Catalog::new();
-    catalog.upsert(origin.clone(), Box::new(example));
+    catalog.upsert(origin, Box::new(example));
 
     let mut question: Message = Message::new();
 
@@ -222,11 +216,8 @@ fn test_catalog_nx_soa() {
     let question_req = MessageRequest::from_bytes(&question_bytes).unwrap();
 
     let response_handler = TestResponseHandler::new();
-    catalog
-        .lookup(question_req, None, response_handler.clone())
-        .wait()
-        .unwrap();
-    let result = response_handler.into_message().wait().unwrap();
+    block_on(catalog.lookup(question_req, None, response_handler.clone()));
+    let result = block_on(response_handler.into_message());
 
     assert_eq!(result.response_code(), ResponseCode::NXDomain);
     assert_eq!(result.message_type(), MessageType::Response);
@@ -287,11 +278,8 @@ fn test_axfr() {
     let question_req = MessageRequest::from_bytes(&question_bytes).unwrap();
 
     let response_handler = TestResponseHandler::new();
-    catalog
-        .lookup(question_req, None, response_handler.clone())
-        .wait()
-        .expect("lookup failed");
-    let result = response_handler.into_message().wait().unwrap();
+    block_on(catalog.lookup(question_req, None, response_handler.clone()));
+    let result = block_on(response_handler.into_message());
 
     let mut answers: Vec<Record> = result.answers().to_vec();
 
@@ -355,7 +343,7 @@ fn test_axfr() {
             .set_rdata(RData::A(Ipv4Addr::new(94, 184, 216, 34)))
             .clone(),
         Record::new()
-            .set_name(www_name.clone())
+            .set_name(www_name)
             .set_ttl(86400)
             .set_rr_type(RecordType::AAAA)
             .set_dns_class(DNSClass::IN)
@@ -364,7 +352,7 @@ fn test_axfr() {
             )))
             .clone(),
         Record::new()
-            .set_name(origin.clone().into())
+            .set_name(origin.into())
             .set_ttl(3600)
             .set_rr_type(RecordType::SOA)
             .set_dns_class(DNSClass::IN)
@@ -396,7 +384,7 @@ fn test_axfr_refused() {
     catalog.upsert(origin.clone(), Box::new(test));
 
     let mut query: Query = Query::new();
-    query.set_name(origin.clone().into());
+    query.set_name(origin.into());
     query.set_query_type(RecordType::AXFR);
 
     let mut question: Message = Message::new();
@@ -407,11 +395,8 @@ fn test_axfr_refused() {
     let question_req = MessageRequest::from_bytes(&question_bytes).unwrap();
 
     let response_handler = TestResponseHandler::new();
-    catalog
-        .lookup(question_req, None, response_handler.clone())
-        .wait()
-        .expect("lookup failed");
-    let result = response_handler.into_message().wait().unwrap();
+    block_on(catalog.lookup(question_req, None, response_handler.clone()));
+    let result = block_on(response_handler.into_message());
 
     assert_eq!(result.response_code(), ResponseCode::Refused);
     assert!(result.answers().is_empty());
@@ -432,7 +417,7 @@ fn test_cname_additionals() {
     let origin = example.origin().clone();
 
     let mut catalog: Catalog = Catalog::new();
-    catalog.upsert(origin.clone(), Box::new(example));
+    catalog.upsert(origin, Box::new(example));
 
     let mut question: Message = Message::new();
 
@@ -447,11 +432,8 @@ fn test_cname_additionals() {
     let question_req = MessageRequest::from_bytes(&question_bytes).unwrap();
 
     let response_handler = TestResponseHandler::new();
-    catalog
-        .lookup(question_req, None, response_handler.clone())
-        .wait()
-        .unwrap();
-    let result = response_handler.into_message().wait().unwrap();
+    block_on(catalog.lookup(question_req, None, response_handler.clone()));
+    let result = block_on(response_handler.into_message());
 
     assert_eq!(result.message_type(), MessageType::Response);
     assert_eq!(result.response_code(), ResponseCode::NoError);
@@ -479,7 +461,7 @@ fn test_multiple_cname_additionals() {
     let origin = example.origin().clone();
 
     let mut catalog: Catalog = Catalog::new();
-    catalog.upsert(origin.clone(), Box::new(example));
+    catalog.upsert(origin, Box::new(example));
 
     let mut question: Message = Message::new();
 
@@ -494,11 +476,8 @@ fn test_multiple_cname_additionals() {
     let question_req = MessageRequest::from_bytes(&question_bytes).unwrap();
 
     let response_handler = TestResponseHandler::new();
-    catalog
-        .lookup(question_req, None, response_handler.clone())
-        .wait()
-        .unwrap();
-    let result = response_handler.into_message().wait().unwrap();
+    block_on(catalog.lookup(question_req, None, response_handler.clone()));
+    let result = block_on(response_handler.into_message());
 
     assert_eq!(result.message_type(), MessageType::Response);
     assert_eq!(result.response_code(), ResponseCode::NoError);

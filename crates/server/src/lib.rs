@@ -13,7 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#![warn(missing_docs)]
+#![warn(
+    missing_docs,
+    clippy::dbg_macro,
+    clippy::print_stdout,
+    clippy::unimplemented
+)]
+#![allow(clippy::single_component_path_imports)]
 #![recursion_limit = "2048"]
 
 //! Trust-DNS is intended to be a fully compliant domain name server and client library.
@@ -32,11 +38,10 @@ extern crate chrono;
 #[macro_use]
 extern crate enum_as_inner;
 extern crate env_logger;
-extern crate failure;
-#[macro_use]
 extern crate futures;
 #[macro_use]
 extern crate log;
+#[cfg(feature = "sqlite")]
 extern crate rusqlite;
 #[macro_use]
 extern crate serde;
@@ -50,16 +55,12 @@ extern crate openssl;
 extern crate rustls;
 extern crate time;
 extern crate tokio;
-extern crate tokio_executor;
-extern crate tokio_io;
-extern crate tokio_reactor;
+#[cfg(feature = "dns-over-openssl")]
+extern crate tokio_openssl;
 #[cfg(feature = "dns-over-rustls")]
 extern crate tokio_rustls;
-extern crate tokio_tcp;
-extern crate tokio_timer;
-extern crate tokio_udp;
 extern crate toml;
-extern crate trust_dns;
+extern crate trust_dns_client;
 #[cfg(feature = "dns-over-https")]
 extern crate trust_dns_https;
 #[cfg(feature = "dns-over-openssl")]

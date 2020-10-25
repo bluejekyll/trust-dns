@@ -20,13 +20,13 @@ use log;
 use toml;
 
 use proto::error::ProtoResult;
-use trust_dns::rr::Name;
+use trust_dns_client::rr::Name;
 
-use authority::ZoneType;
-use error::{ConfigError, ConfigResult};
-use store::StoreConfig;
+use crate::authority::ZoneType;
+use crate::error::{ConfigError, ConfigResult};
+use crate::store::StoreConfig;
 
-static DEFAULT_PATH: &'static str = "/var/named"; // TODO what about windows (do I care? ;)
+static DEFAULT_PATH: &str = "/var/named"; // TODO what about windows (do I care? ;)
 static DEFAULT_PORT: u16 = 53;
 static DEFAULT_TLS_PORT: u16 = 853;
 static DEFAULT_HTTPS_PORT: u16 = 443;
@@ -222,8 +222,8 @@ impl ZoneConfig {
     /// this is ony used on first load, if dynamic update is enabled for the zone, then the journal
     /// file is the actual source of truth for the zone.
     pub fn get_file(&self) -> PathBuf {
-        // FIXME: Option on PathBuf
-        PathBuf::from(self.file.as_ref().unwrap())
+        // TODO: Option on PathBuf
+        PathBuf::from(self.file.as_ref().expect("file was none"))
     }
 
     /// enable dynamic updates for the zone (see SIG0 and the registered keys)

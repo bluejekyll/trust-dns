@@ -14,7 +14,7 @@ use typed_headers::{mime::Mime, ContentLength, ContentType, HeaderMapExt};
 
 use trust_dns_proto::error::ProtoError;
 
-use HttpsResult;
+use crate::HttpsResult;
 
 /// Create a new Response for an http/2 dns-message request
 ///
@@ -42,15 +42,14 @@ use HttpsResult;
 /// code 406, [RFC7231] Section 6.5.6), and so on.
 /// ```
 pub fn new(message_len: usize) -> HttpsResult<Response<()>> {
-    let mut response = Response::builder();
-    response.status(StatusCode::OK);
-    response.version(Version::HTTP_2);
+    let response = Response::builder();
+    let response = response.status(StatusCode::OK).version(Version::HTTP_2);
     let mut response = response
         .body(())
         .map_err(|e| ProtoError::from(format!("invalid response: {}", e)))?;
 
-    let accepts_dns = Mime::from_str(::MIME_APPLICATION_DNS).unwrap();
-    let content_type = ContentType(accepts_dns.clone());
+    let accepts_dns = Mime::from_str(crate::MIME_APPLICATION_DNS).unwrap();
+    let content_type = ContentType(accepts_dns);
 
     response.headers_mut().typed_insert(&content_type);
     response

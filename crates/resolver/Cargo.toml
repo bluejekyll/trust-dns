@@ -1,7 +1,8 @@
 [package]
 name = "trust-dns-resolver"
-version = "0.12.0"
+version = "0.20.0"
 authors = ["Benjamin Fry <benjaminfry@me.com>"]
+edition = "2018"
 
 # A short blurb about the package. This is not rendered in any format when
 # uploaded to crates.io (aka this is not markdown)
@@ -30,16 +31,16 @@ categories = ["network-programming"]
 license = "MIT/Apache-2.0"
 
 [badges]
-travis-ci = { repository = "bluejekyll/trust-dns" }
-appveyor = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+#github-actions = { repository = "bluejekyll/trust-dns", branch = "master", workflow = "test" }
 codecov = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+maintenance = { status = "actively-developed" }
 
 [features]
-default = ["tokio"]
-dns-over-native-tls = ["dns-over-tls", "trust-dns-native-tls"]
+default = ["system-config", "tokio-runtime"]
+dns-over-native-tls = ["dns-over-tls", "tokio-tls", "trust-dns-native-tls"]
 # DNS over TLS with OpenSSL currently needs a good way to set default CAs, use rustls or native-tls
-dns-over-openssl = ["dns-over-tls", "trust-dns-openssl"]
-dns-over-rustls = ["dns-over-tls", "rustls", "trust-dns-rustls", "webpki-roots"]
+dns-over-openssl = ["dns-over-tls", "trust-dns-openssl", "tokio-openssl"]
+dns-over-rustls = ["dns-over-tls", "rustls", "tokio-rustls", "trust-dns-rustls", "webpki-roots"]
 dns-over-tls = []
 
 # This requires some TLS library, currently only rustls is supported
@@ -51,39 +52,44 @@ dnssec-ring = ["dnssec", "trust-dns-proto/dnssec-ring"]
 dnssec = []
 
 serde-config = ["serde", "trust-dns-proto/serde-config"]
+system-config = ["ipconfig", "resolv-conf"]
 
+# enables experimental the mDNS (multicast) feature
 mdns = ["trust-dns-proto/mdns"]
+
+testing = []
+tokio-runtime = ["tokio/rt-core", "trust-dns-proto/tokio-runtime"]
 
 [lib]
 name = "trust_dns_resolver"
 path = "src/lib.rs"
 
 [dependencies]
-cfg-if = "0.1"
-failure = "0.1"
-futures = "^0.1.28"
-lazy_static = "^1.0"
-log = "^0.4.8"
-lru-cache = "^0.1.2"
-resolv-conf = { version = "0.6.0", features = ["system"] }
-rustls = {version  = "0.16", optional = true}
+backtrace = "0.3.48"
+cfg-if = "0.1.9"
+futures-util = { version = "0.3.5", default-features = false, features = ["std"] }
+lazy_static = "1.0"
+log = "0.4"
+lru-cache = "0.1.2"
+resolv-conf = { version = "0.6.0", optional = true, features = ["system"] }
+rustls = {version  = "0.17", optional = true}
 serde = { version = "1.0", features = ["derive"], optional = true }
-smallvec = "^0.6"
-tokio = { version = "^0.1.22", optional = true }
-tokio-executor = "^0.1.8"
-tokio-tcp = "^0.1"
-tokio-udp = "^0.1"
-trust-dns-https = { version = "0.4.0", path = "../https", optional = true }
-trust-dns-native-tls = { version = "0.7.0", path = "../native-tls", optional = true }
-trust-dns-openssl = { version = "0.7.0", path = "../openssl", optional = true }
-trust-dns-proto = { version = "0.8.0", path = "../proto" }
-trust-dns-rustls = { version = "0.7.0", path = "../rustls", optional = true }
-webpki-roots = { version = "^0.17", optional = true }
+smallvec = "1.2"
+thiserror = "1.0.18"
+tokio = { version = "0.2.16", optional = true }
+tokio-tls = { version = "0.3.1", optional = true }
+tokio-openssl = { version = "0.4.0", optional = true }
+tokio-rustls = { version = "0.13", optional = true }
+trust-dns-https = { version = "0.20.0", path = "../https", optional = true }
+trust-dns-native-tls = { version = "0.20.0", path = "../native-tls", optional = true }
+trust-dns-openssl = { version = "0.20.0", path = "../openssl", optional = true }
+trust-dns-proto = { version = "0.20.0", path = "../proto", default-features = false }
+trust-dns-rustls = { version = "0.20.0", path = "../rustls", optional = true }
+webpki-roots = { version = "0.19", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-ipconfig = { version = "^0.2.0" }
+ipconfig = { version = "0.2.2", optional = true }
 
 [dev-dependencies]
-env_logger = "^0.6"
-tokio-io = "^0.1"
-tokio = "^0.1.22"
+env_logger = "0.7"
+futures-executor = { version = "0.3.5", default-features = false, features = ["std"] }

@@ -14,10 +14,10 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{self, types::ToSql, Connection};
 use time;
 
-use trust_dns::rr::Record;
-use trust_dns::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
+use trust_dns_client::rr::Record;
+use trust_dns_client::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
 
-use error::{PersistenceErrorKind, PersistenceResult};
+use crate::error::{PersistenceErrorKind, PersistenceResult};
 
 /// The current Journal version of the application
 pub const CURRENT_VERSION: i64 = 1;
@@ -175,7 +175,7 @@ impl Journal {
         //
         match record_opt {
             Some(Ok((row_id, record))) => Ok(Some((row_id, record))),
-            Some(Err(err)) => Err(Err(err)?),
+            Some(Err(err)) => Err(err.into()),
             None => Ok(None),
         }
     }
@@ -203,7 +203,7 @@ impl Journal {
 
         let tdns_schema = match tdns_schema_opt {
             Some(Ok(string)) => string,
-            Some(Err(err)) => return Err(err)?,
+            Some(Err(err)) => return Err(err.into()),
             None => return Ok(-1),
         };
 

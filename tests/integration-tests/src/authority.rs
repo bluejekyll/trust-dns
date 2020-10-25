@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use trust_dns::rr::*;
+use trust_dns_client::rr::*;
 
 use trust_dns_server::authority::ZoneType;
 use trust_dns_server::store::in_memory::InMemoryAuthority;
@@ -9,7 +9,7 @@ use trust_dns_server::store::in_memory::InMemoryAuthority;
 #[allow(clippy::unreadable_literal)]
 pub fn create_example() -> InMemoryAuthority {
     use std::net::*;
-    use trust_dns::rr::rdata::*;
+    use trust_dns_client::rr::rdata::*;
 
     let origin: Name = Name::parse("example.com.", None).unwrap();
     let mut records = InMemoryAuthority::empty(origin.clone(), ZoneType::Master, false);
@@ -88,7 +88,7 @@ pub fn create_example() -> InMemoryAuthority {
     // example.com.		86400	IN	AAAA	2606:2800:220:1:248:1893:25c8:1946
     records.upsert(
         Record::new()
-            .set_name(origin.clone())
+            .set_name(origin)
             .set_ttl(86400)
             .set_rr_type(RecordType::AAAA)
             .set_dns_class(DNSClass::IN)
@@ -140,8 +140,6 @@ pub fn create_example() -> InMemoryAuthority {
         0,
     );
 
-    // FIXME: THESE NEW CNAME RECORDS ARE CAUSING NSEC TO FAIL, WHY?
-
     // www.example.com.	86400	IN	AAAA	2606:2800:220:1:248:1893:25c8:1946
     records.upsert(
         Record::new()
@@ -163,7 +161,7 @@ pub fn create_example() -> InMemoryAuthority {
             .set_ttl(86400)
             .set_rr_type(RecordType::CNAME)
             .set_dns_class(DNSClass::IN)
-            .set_rdata(RData::CNAME(www_name.clone()))
+            .set_rdata(RData::CNAME(www_name))
             .clone(),
         0,
     );
@@ -194,7 +192,7 @@ pub fn create_example() -> InMemoryAuthority {
 pub fn create_secure_example() -> InMemoryAuthority {
     use chrono::Duration;
     use openssl::rsa::Rsa;
-    use trust_dns::rr::dnssec::*;
+    use trust_dns_client::rr::dnssec::*;
     use trust_dns_server::authority::Authority;
 
     let mut authority = create_example();

@@ -4,24 +4,18 @@
 // http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
-extern crate clap;
-extern crate env_logger;
-#[macro_use]
-extern crate log;
-extern crate openssl;
-extern crate trust_dns;
-
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 
 use clap::{App, Arg, ArgMatches};
+use log::info;
 use openssl::pkey::PKey;
 
-use trust_dns::rr::dnssec::{KeyPair, Public};
+use trust_dns_client::rr::dnssec::{KeyPair, Public};
 
 fn args<'a>() -> ArgMatches<'a> {
     App::new("Trust-DNS pem-to-public-dnskey")
-        .version(trust_dns::version())
+        .version(trust_dns_client::version())
         .author("Benjamin Fry <benjaminfry@me.com>")
         .about(
             "Converts a PEM formatted public key into a raw public dnskey (not the inverse of dnskey-to-pem). This can be used to create a dnskey in the TrustAnchor internal format in Trust-DNS.",
@@ -108,9 +102,9 @@ mod test {
 
     #[test]
     fn read_pem_into_key_pair() {
-        let server_path = env::var("TDNS_SERVER_SRC_ROOT").unwrap_or_else(|_| ".".to_owned());
+        let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "..".to_owned());
 
-        let path = [&server_path, "..", "tests", "test-data", "ca.pubkey"]
+        let path = [&server_path, "tests", "test-data", "ca.pubkey"]
             .iter()
             .collect::<PathBuf>();
         let mut pem = File::open(path).unwrap();

@@ -1,0 +1,94 @@
+[package]
+name = "trust-dns"
+version = "0.20.0"
+authors = ["Benjamin Fry <benjaminfry@me.com>"]
+edition = "2018"
+
+# A short blurb about the package. This is not rendered in any format when
+# uploaded to crates.io (aka this is not markdown)
+description = """
+Trust-DNS is a safe and secure DNS server with DNSec support.
+ Eventually this could be a replacement for BIND9. The DNSSec support allows
+ for live signing of all records, in it does not currently support
+ records signed offline. The server supports dynamic DNS with SIG0 authenticated
+ requests. Trust-DNS is based on the Tokio and Futures libraries, which means
+ it should be easily integrated into other software that also use those
+ libraries.
+"""
+
+# These URLs point to more information about the repository
+documentation = "https://docs.rs/trust-dns-server"
+homepage = "http://www.trust-dns.org/index.html"
+repository = "https://github.com/bluejekyll/trust-dns"
+
+# This points to a file in the repository (relative to this Cargo.toml). The
+# contents of this file are stored and indexed in the registry.
+readme = "README.md"
+
+# This is a small list of keywords used to categorize and search for this
+# package.
+keywords = ["DNS", "BIND", "dig", "named", "dnssec"]
+categories = ["network-programming"]
+
+# This is a string description of the license for this package. Currently
+# crates.io will validate the license provided against a whitelist of known
+# license identifiers from http://spdx.org/licenses/. Multiple licenses can
+# be separated with a `/`
+license = "MIT/Apache-2.0"
+
+[badges]
+#github-actions = { repository = "bluejekyll/trust-dns", branch = "master", workflow = "test" }
+codecov = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+maintenance = { status = "actively-developed" }
+
+[features]
+default = ["sqlite", "resolver"]
+dnssec-openssl = ["dnssec", "trust-dns-client/dnssec-openssl", "trust-dns-proto/dnssec-openssl", "trust-dns-server/dnssec-openssl"]
+dnssec-ring = ["dnssec", "trust-dns-client/dnssec-ring", "trust-dns-proto/dnssec-ring", "trust-dns-server/dnssec-ring"]
+dnssec = []
+resolver = ["trust-dns-server/resolver"]
+sqlite = ["trust-dns-server/sqlite"]
+
+# TODO: Need to figure out how to be consistent with ring/openssl usage...
+# dns-over-https-openssl = ["dns-over-openssl", "trust-dns-client/dns-over-https-openssl", "dns-over-https"]
+dns-over-https-rustls = ["dns-over-https", "dns-over-rustls", "trust-dns-client/dns-over-https-rustls", "trust-dns-server/dns-over-https-rustls"]
+dns-over-https = ["trust-dns-server/dns-over-https"]
+
+# TODO: migrate all tls and tls-openssl features to dns-over-tls, et al
+dns-over-openssl = ["dns-over-tls", "dnssec-openssl", "trust-dns-openssl", "trust-dns-client/dns-over-openssl", "trust-dns-server/dns-over-openssl"]
+dns-over-rustls = ["dns-over-tls", "dnssec-ring", "trust-dns-rustls", "rustls", "trust-dns-client/dns-over-rustls", "trust-dns-server/dns-over-rustls",]
+dns-over-tls = []
+
+# This is a deprecated feature...
+tls-openssl = ["dns-over-openssl"]
+tls = ["dns-over-openssl"]
+
+# WARNING: there is a bug in the mutual tls auth code at the moment see issue #100
+# mtls = ["trust-dns-client/mtls"]
+
+[[bin]]
+name = "named"
+path = "src/named.rs"
+
+[dependencies]
+chrono = "0.4.1"
+clap = "2.33"
+futures = { version = "0.3.5", default-features = false, features = ["std"] }
+log = "0.4"
+rustls = { version = "0.17", optional = true }
+tokio = { version = "0.2.16", features = ["rt-core", "rt-threaded", "time"] }
+trust-dns-client = { version = "0.20.0", path = "../crates/client" }
+trust-dns-openssl = { version = "0.20.0", path = "../crates/openssl", optional = true }
+trust-dns-proto = { version = "0.20.0", path = "../crates/proto" }
+trust-dns-rustls = { version = "0.20.0", path = "../crates/rustls", optional = true }
+trust-dns-server = { version = "0.20.0", path = "../crates/server" }
+
+[dev-dependencies]
+env_logger = "0.7"
+native-tls = "0.2"
+regex = "1.3.4"
+trust-dns-proto = { version = "0.20.0", path = "../crates/proto", features = ["testing"] }
+trust-dns-native-tls = { version = "0.20.0", path = "../crates/native-tls" }
+trust-dns-https = { version = "0.20.0", path = "../crates/https" }
+trust-dns-resolver = { version = "0.20.0", path = "../crates/resolver" }
+webpki-roots = { version = "0.19" }

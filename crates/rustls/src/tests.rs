@@ -5,6 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+#![allow(clippy::dbg_macro, clippy::print_stdout)]
+
 extern crate openssl;
 
 use std;
@@ -24,14 +26,14 @@ use self::openssl::ssl::*;
 use self::openssl::x509::store::X509StoreBuilder;
 use self::openssl::x509::*;
 
-use futures::Stream;
+use futures::StreamExt;
 use rustls::Certificate;
 use rustls::ClientConfig;
-use tokio::runtime::current_thread::Runtime;
+use tokio::runtime::Runtime;
 
 use trust_dns_proto::xfer::SerialMessage;
 
-use tls_connect;
+use crate::tls_connect;
 
 // this fails on linux for some reason. It appears that a buffer somewhere is dirty
 //  and subsequent reads of a message buffer reads the wrong length. It works for 2 iterations
@@ -75,7 +77,7 @@ fn tls_client_stream_test(server_addr: IpAddr, mtls: bool) {
     thread::Builder::new()
         .name("thread_killer".to_string())
         .spawn(move || {
-            let succeeded = succeeded_clone.clone();
+            let succeeded = succeeded_clone;
             for _ in 0..15 {
                 thread::sleep(time::Duration::from_secs(1));
                 if succeeded.load(atomic::Ordering::Relaxed) {
@@ -84,17 +86,18 @@ fn tls_client_stream_test(server_addr: IpAddr, mtls: bool) {
             }
 
             panic!("timeout");
-        }).unwrap();
+        })
+        .unwrap();
 
-    let server_path = env::var("TDNS_SERVER_SRC_ROOT").unwrap_or_else(|_| "../server".to_owned());
+    let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
     println!("using server src path: {}", server_path);
 
-    let root_cert_der = read_file(&format!("{}/../../tests/test-data/ca.der", server_path));
+    let root_cert_der = read_file(&format!("{}/tests/test-data/ca.der", server_path));
     let root_cert_der_copy = root_cert_der.clone();
 
     // Generate X509 certificate
     let dns_name = "ns.example.com";
-    let server_pkcs12_der = read_file(&format!("{}/../../tests/test-data/cert.p12", server_path));
+    let server_pkcs12_der = read_file(&format!("{}/tests/test-data/cert.p12", server_path));
 
     // TODO: need a timeout on listen
     let server = std::net::TcpListener::bind(SocketAddr::new(server_addr, 0)).unwrap();
@@ -186,7 +189,8 @@ fn tls_client_stream_test(server_addr: IpAddr, mtls: bool) {
                 // println!("wrote bytes iter: {}", i);
                 std::thread::yield_now();
             }
-        }).unwrap();
+        })
+        .unwrap();
 
     // let the server go first
     std::thread::yield_now();
@@ -201,7 +205,10 @@ fn tls_client_stream_test(server_addr: IpAddr, mtls: bool) {
     let trust_chain = Certificate(root_cert_der);
 
     let mut config = ClientConfig::new();
-    config.root_store.add(&trust_chain).expect("bad certificate!");
+    config
+        .root_store
+        .add(&trust_chain)
+        .expect("bad certificate!");
 
     // barrier.wait();
     // fix MTLS
@@ -219,12 +226,11 @@ fn tls_client_stream_test(server_addr: IpAddr, mtls: bool) {
         sender
             .unbounded_send(SerialMessage::new(TEST_BYTES.to_vec(), server_addr))
             .expect("send failed");
-        let (buffer, stream_tmp) = io_loop
-            .block_on(stream.into_future())
-            .ok()
-            .expect("future iteration run failed");
+        let (buffer, stream_tmp) = io_loop.block_on(stream.into_future());
         stream = stream_tmp;
-        let message = buffer.expect("no buffer received");
+        let message = buffer
+            .expect("no buffer received")
+            .expect("error receiving buffer");
         assert_eq!(message.bytes(), TEST_BYTES);
     }
 

@@ -2,17 +2,24 @@
 
 #[macro_use]
 extern crate lazy_static;
-extern crate futures;
+extern crate futures_util;
+#[cfg(feature = "tokio-runtime")]
 extern crate tokio;
-extern crate tokio_io;
 extern crate trust_dns_resolver;
 
+use std::fmt::Display;
+#[cfg(feature = "tokio-runtime")]
 use std::io;
+#[cfg(feature = "tokio-runtime")]
 use std::net::SocketAddr;
+use std::task::Poll;
 
-use futures::Future;
-use tokio_io::IoFuture;
-use trust_dns_resolver::{AsyncResolver, IntoName, TryParseIp};
+use futures_util::future;
+
+#[cfg(feature = "tokio-runtime")]
+use trust_dns_resolver::TokioAsyncResolver;
+#[cfg(feature = "tokio-runtime")]
+use trust_dns_resolver::{IntoName, TryParseIp};
 
 // This is an example of registering a static global resolver into any system.
 //
@@ -22,14 +29,15 @@ use trust_dns_resolver::{AsyncResolver, IntoName, TryParseIp};
 // Thank you to @zonyitoo for the original example.
 // TODO: this example can probably be made much simpler with the new
 //      `AsyncResolver`.
+#[cfg(feature = "tokio-runtime")]
 lazy_static! {
     // First we need to setup the global Resolver
-    static ref GLOBAL_DNS_RESOLVER: AsyncResolver = {
+    static ref GLOBAL_DNS_RESOLVER: TokioAsyncResolver = {
         use std::sync::{Arc, Mutex, Condvar};
         use std::thread;
 
         // We'll be using this condvar to get the Resolver from the thread...
-        let pair = Arc::new((Mutex::new(None::<AsyncResolver>), Condvar::new()));
+        let pair = Arc::new((Mutex::new(None::<TokioAsyncResolver>), Condvar::new()));
         let pair2 = pair.clone();
 
 
@@ -38,16 +46,16 @@ lazy_static! {
         // This thread will manage the actual resolution runtime
         thread::spawn(move || {
             // A runtime for this new thread
-            let mut runtime = tokio::runtime::current_thread::Runtime::new().expect("failed to launch Runtime");
+            let mut runtime = tokio::runtime::Runtime::new().expect("failed to launch Runtime");
 
             // our platform independent future, result, see next blocks
-            let (resolver, bg) = {
+            let resolver = {
 
                 // To make this independent, if targeting macOS, BSD, Linux, or Windows, we can use the system's configuration:
                 #[cfg(any(unix, windows))]
                 {
                     // use the system resolver configuration
-                    AsyncResolver::from_system_conf().expect("Failed to create AsyncResolver")
+                    TokioAsyncResolver::from_system_conf(runtime.handle().clone())
                 }
 
                 // For other operating systems, we can use one of the preconfigured definitions
@@ -57,17 +65,20 @@ lazy_static! {
                     use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
                     // Get a new resolver with the google nameservers as the upstream recursive resolvers
-                    AsyncResolver::new(ResolverConfig::google(), ResolverOpts::default())
+                    TokioAsyncResolver::new(ResolverConfig::google(), ResolverOpts::default(), runtime.handle().clone())
                 }
             };
 
             let &(ref lock, ref cvar) = &*pair2;
             let mut started = lock.lock().unwrap();
+
+            let resolver = resolver.expect("failed to create trust-dns-resolver");
+
             *started = Some(resolver);
             cvar.notify_one();
             drop(started);
 
-            runtime.block_on(bg).expect("Failed to create DNS resolver");
+            runtime.block_on(future::poll_fn(|_cx| Poll::<()>::Pending))
         });
 
         // Wait for the thread to start up.
@@ -89,30 +100,33 @@ lazy_static! {
 ///
 /// This looks up the `host` (a `&str` or `String` is good), and combines that with the provided port
 ///   this mimics the lookup functions of `std::net`.
-pub fn resolve<N: IntoName + TryParseIp>(host: N, port: u16) -> IoFuture<Vec<SocketAddr>> {
+#[cfg(feature = "tokio-runtime")]
+pub async fn resolve<N: IntoName + Display + TryParseIp + 'static>(
+    host: N,
+    port: u16,
+) -> io::Result<Vec<SocketAddr>> {
     // Now we use the global resolver to perform a lookup_ip.
-    let resolve_future = GLOBAL_DNS_RESOLVER.lookup_ip(host).then(move |result| {
-        // map the result into what we want...
-        result
-            .map_err(move |err| {
-                // we transform the error into a standard IO error for convenience
-                io::Error::new(
-                    io::ErrorKind::AddrNotAvailable,
-                    format!("dns resolution error: {}", err),
-                )
-            }).map(move |lookup_ip| {
-                // we take all the IPs returned, and then send back the set of IPs
-                lookup_ip
-                    .iter()
-                    .map(|ip| SocketAddr::new(ip, port))
-                    .collect::<Vec<_>>()
-            })
-    });
-
-    // Now return the boxed future
-    Box::new(resolve_future)
+    let name = host.to_string();
+    let result = GLOBAL_DNS_RESOLVER.lookup_ip(host).await;
+    // map the result into what we want...
+    result
+        .map_err(move |err| {
+            // we transform the error into a standard IO error for convenience
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!("dns resolution error for {}: {}", name, err),
+            )
+        })
+        .map(move |lookup_ip| {
+            // we take all the IPs returned, and then send back the set of IPs
+            lookup_ip
+                .iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect::<Vec<_>>()
+        })
 }
 
+#[cfg(feature = "tokio-runtime")]
 fn main() {
     use std::thread;
 
@@ -124,19 +138,25 @@ fn main() {
         .iter()
         .map(|name| {
             let join = thread::spawn(move || {
-                let mut runtime = tokio::runtime::current_thread::Runtime::new()
-                    .expect("failed to launch Runtime");
+                let mut runtime = tokio::runtime::Runtime::new().expect("failed to launch Runtime");
                 runtime.block_on(resolve(*name, 443))
             });
 
             (name, join)
-        }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
 
     // print the resolved IPs
     for (name, join) in threads {
         let result = join
             .join()
-            .unwrap_or_else(|_| panic!("error resolving: {}", name));
+            .expect("resolution thread failed")
+            .expect("resolution failed");
         println!("{} resolved to {:?}", name, result);
     }
+}
+
+#[cfg(not(feature = "tokio-runtime"))]
+fn main() {
+    println!("tokio-runtime feature must be enabled")
 }

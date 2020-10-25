@@ -14,13 +14,13 @@ use openssl::{pkey::PKey, stack::Stack, x509::X509};
 #[cfg(feature = "dns-over-rustls")]
 use rustls::{Certificate, PrivateKey};
 
-use trust_dns::error::ParseResult;
-use trust_dns::rr::dnssec::Algorithm;
+use trust_dns_client::error::ParseResult;
+use trust_dns_client::rr::dnssec::Algorithm;
 #[cfg(any(feature = "dns-over-tls", feature = "dnssec"))]
-use trust_dns::rr::dnssec::{KeyFormat, KeyPair, Private, Signer};
+use trust_dns_client::rr::dnssec::{KeyFormat, KeyPair, Private, Signer};
 #[cfg(feature = "dnssec")]
-use trust_dns::rr::domain::IntoName;
-use trust_dns::rr::domain::Name;
+use trust_dns_client::rr::domain::IntoName;
+use trust_dns_client::rr::domain::Name;
 
 /// Key pair configuration for DNSSec keys for signing a zone
 #[derive(Deserialize, PartialEq, Debug)]
@@ -76,7 +76,7 @@ impl KeyConfig {
     /// Converts key into
     #[cfg(any(feature = "dns-over-tls", feature = "dnssec"))]
     pub fn format(&self) -> ParseResult<KeyFormat> {
-        use trust_dns::error::ParseErrorKind;
+        use trust_dns_client::error::ParseErrorKind;
 
         let extension = self.key_path().extension().ok_or_else(|| {
             ParseErrorKind::Msg(format!(
@@ -101,7 +101,7 @@ impl KeyConfig {
 
     /// Returns the password used to read the key
     pub fn password(&self) -> Option<&str> {
-        self.password.as_ref().map(String::as_str)
+        self.password.as_deref()
     }
 
     /// algorithm for for the key, see `Algorithm` for supported algorithms.
@@ -150,7 +150,7 @@ impl KeyConfig {
             .into_name()
             .map_err(|e| format!("error loading signer name: {}", e))?;
 
-        let key = load_key(signer_name.clone(), self)
+        let key = load_key(signer_name, self)
             .map_err(|e| format!("failed to load key: {:?} msg: {}", self.key_path(), e))?;
 
         key.test_key()
@@ -220,12 +220,12 @@ impl TlsCertConfig {
 
     /// optional password for open the pkcs12, none assumes no password
     pub fn get_password(&self) -> Option<&str> {
-        self.password.as_ref().map(String::as_str)
+        self.password.as_deref()
     }
 
     /// returns the path to the private key, as associated with the certificate
     pub fn get_private_key(&self) -> Option<&Path> {
-        self.private_key.as_ref().map(String::as_str).map(Path::new)
+        self.private_key.as_deref().map(Path::new)
     }
 
     /// returns the path to the private key
@@ -288,12 +288,7 @@ fn load_key(zone_name: Name, key_config: &KeyConfig) -> Result<Signer, String> {
     let dnskey = key
         .to_dnskey(algorithm)
         .map_err(|e| format!("error converting to dnskey: {}", e))?;
-    Ok(Signer::dnssec(
-        dnskey.clone(),
-        key,
-        name,
-        Duration::weeks(52),
-    ))
+    Ok(Signer::dnssec(dnskey, key, name, Duration::weeks(52)))
 }
 
 /// Load a Certificate from the path (with openssl)
@@ -302,8 +297,7 @@ pub fn load_cert(
     zone_dir: &Path,
     tls_cert_config: &TlsCertConfig,
 ) -> Result<((X509, Option<Stack<X509>>), PKey<Private>), String> {
-    use config::dnssec::{CertType, PrivateKeyType};
-    use trust_dns_openssl::tls_server::{
+    use crate::trust_dns_openssl::tls_server::{
         read_cert_pem, read_cert_pkcs12, read_key_from_der, read_key_from_pkcs8,
     };
 

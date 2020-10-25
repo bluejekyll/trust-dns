@@ -9,10 +9,11 @@ use std::iter::Chain;
 use std::slice::Iter;
 use std::sync::Arc;
 
-use authority::LookupObject;
-use proto::rr::dnssec::SupportedAlgorithms;
-use proto::rr::{Record, RecordSet, RecordType, RrsetRecords};
-use trust_dns::rr::LowerName;
+use trust_dns_client::rr::LowerName;
+
+use crate::authority::LookupObject;
+use crate::proto::rr::dnssec::SupportedAlgorithms;
+use crate::proto::rr::{Record, RecordSet, RecordType, RrsetRecords};
 
 /// The result of a lookup on an Authority
 ///
@@ -58,7 +59,7 @@ impl AuthLookup {
 
     /// Returns true if either the associated Records are empty, or this is a NameExists or NxDomain
     pub fn is_empty(&self) -> bool {
-        // FIXME: this needs to be cheap
+        // TODO: this needs to be cheap
         self.was_empty()
     }
 
@@ -124,7 +125,7 @@ impl<'a> IntoIterator for &'a AuthLookup {
     fn into_iter(self) -> Self::IntoIter {
         match self {
             AuthLookup::Empty => AuthLookupIter::Empty,
-            // FIXME: what about the additionals? is IntoIterator a bad idea?
+            // TODO: what about the additionals? is IntoIterator a bad idea?
             AuthLookup::Records { answers: r, .. } | AuthLookup::SOA(r) => {
                 AuthLookupIter::Records(r.into_iter())
             }

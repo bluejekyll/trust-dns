@@ -9,10 +9,10 @@
 
 use std::fmt::Debug;
 
-use op::{Message, Query, MessageType, OpCode};
-use rr::{Record, RecordSet, DNSClass, Name, RecordType, RData};
-use rr::rdata::NULL;
-use client::client_future::MAX_PAYLOAD_LEN;
+use crate::client::async_client::MAX_PAYLOAD_LEN;
+use crate::op::{Message, MessageType, OpCode, Query};
+use crate::rr::rdata::NULL;
+use crate::rr::{DNSClass, Name, RData, Record, RecordSet, RecordType};
 
 /// To reduce errors in using the Message struct as an Update, this will do the call throughs
 ///   to properly do that.

@@ -9,12 +9,13 @@
 //! TODO: This modules was moved from trust-dns-rustls, it really doesn't need to exist if tests are refactored...
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Future;
 
-use trust_dns::client::ClientConnection;
-use trust_dns::rr::dnssec::Signer;
+use trust_dns_client::client::ClientConnection;
+use trust_dns_client::rr::dnssec::Signer;
 use trust_dns_proto::error::ProtoError;
 use trust_dns_proto::xfer::{DnsMultiplexer, DnsMultiplexerConnect, DnsRequestSender};
 
@@ -23,7 +24,7 @@ use trust_dns_rustls::{tls_client_connect, TlsClientStream};
 
 /// Tls client connection
 ///
-/// Use with `trust_dns::client::Client` impls
+/// Use with `trust_dns_client::client::Client` impls
 pub struct TlsClientConnection {
     name_server: SocketAddr,
     dns_name: String,
@@ -45,11 +46,12 @@ impl TlsClientConnection {
     }
 }
 
+#[allow(clippy::type_complexity)]
 impl ClientConnection for TlsClientConnection {
     type Sender = DnsMultiplexer<TlsClientStream, Signer>;
     type Response = <Self::Sender as DnsRequestSender>::DnsResponseFuture;
     type SenderFuture = DnsMultiplexerConnect<
-        Box<dyn Future<Item = TlsClientStream, Error = ProtoError> + Send>,
+        Pin<Box<dyn Future<Output = Result<TlsClientStream, ProtoError>> + Send>>,
         TlsClientStream,
         Signer,
     >;
@@ -61,6 +63,6 @@ impl ClientConnection for TlsClientConnection {
             self.client_config.clone(),
         );
 
-        DnsMultiplexer::new(Box::new(tls_client_stream), Box::new(handle), signer)
+        DnsMultiplexer::new(Box::pin(tls_client_stream), Box::new(handle), signer)
     }
 }

@@ -8,33 +8,37 @@
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use futures::stream::{Fuse, Peekable, Stream};
-use futures::sync::mpsc::{unbounded, UnboundedReceiver};
-use futures::task;
-use futures::{Async, Future, Poll};
+use async_trait::async_trait;
+use futures_channel::mpsc::{unbounded, UnboundedReceiver};
+use futures_util::stream::{Fuse, Peekable, Stream, StreamExt};
+use futures_util::{future::Future, ready, FutureExt, TryFutureExt};
+use log::debug;
 use rand;
 use rand::distributions::{uniform::Uniform, Distribution};
 
 use crate::xfer::{BufStreamHandle, SerialMessage};
 
 /// Trait for UdpSocket
+#[async_trait]
 pub trait UdpSocket
 where
-    Self: Sized,
+    Self: Sized + Unpin,
 {
     /// UdpSocket
-    fn bind(addr: &SocketAddr) -> io::Result<Self>;
+    async fn bind(addr: &SocketAddr) -> io::Result<Self>;
     /// Receive data from the socket and returns the number of bytes read and the address from
     /// where the data came on success.
-    fn poll_recv_from(&mut self, buf: &mut [u8]) -> Poll<(usize, SocketAddr), io::Error>;
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)>;
     /// Send data to the given address.
-    fn poll_send_to(&mut self, buf: &[u8], target: &SocketAddr) -> Poll<(), io::Error>;
+    async fn send_to(&mut self, buf: &[u8], target: &SocketAddr) -> io::Result<usize>;
 }
 
 /// A UDP stream of DNS binary packets
 #[must_use = "futures do nothing unless polled"]
-pub struct UdpStream<S> {
+pub struct UdpStream<S: Send> {
     socket: S,
     outbound_messages: Peekable<Fuse<UnboundedReceiver<SerialMessage>>>,
 }
@@ -53,10 +57,11 @@ impl<S: UdpSocket + Send + 'static> UdpStream<S> {
     ///
     /// a tuple of a Future Stream which will handle sending and receiving messages, and a
     ///  handle which can be used to send messages into the stream.
+    #[allow(clippy::type_complexity)]
     pub fn new(
         name_server: SocketAddr,
     ) -> (
-        Box<Future<Item = UdpStream<S>, Error = io::Error> + Send>,
+        Box<dyn Future<Output = Result<UdpStream<S>, io::Error>> + Send + Unpin>,
         BufStreamHandle,
     ) {
         let (message_sender, outbound_messages) = unbounded();
@@ -68,7 +73,7 @@ impl<S: UdpSocket + Send + 'static> UdpStream<S> {
 
         // This set of futures collapses the next udp socket into a stream which can be used for
         //  sending and receiving udp packets.
-        let stream = Box::new(next_socket.map(move |socket| UdpStream {
+        let stream = Box::new(next_socket.map_ok(move |socket| UdpStream {
             socket,
             outbound_messages: outbound_messages.fuse().peekable(),
         }));
@@ -113,43 +118,50 @@ impl<S: UdpSocket + Send + 'static> UdpStream<S> {
     }
 }
 
-impl<S: UdpSocket> Stream for UdpStream<S> {
-    type Item = SerialMessage;
-    type Error = io::Error;
+impl<S: Send> UdpStream<S> {
+    #[allow(clippy::type_complexity)]
+    fn pollable_split(
+        &mut self,
+    ) -> (
+        &mut S,
+        &mut Peekable<Fuse<UnboundedReceiver<SerialMessage>>>,
+    ) {
+        (&mut self.socket, &mut self.outbound_messages)
+    }
+}
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+impl<S: UdpSocket + Send + 'static> Stream for UdpStream<S> {
+    type Item = Result<SerialMessage, io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let (socket, outbound_messages) = self.pollable_split();
+        let mut socket = Pin::new(socket);
+        let mut outbound_messages = Pin::new(outbound_messages);
+
         // this will not accept incoming data while there is data to send
         //  makes this self throttling.
-        loop {
+        while let Poll::Ready(Some(message)) = outbound_messages.as_mut().poll_peek(cx) {
             // first try to send
-            match self
-                .outbound_messages
-                .peek()
-                .map_err(|()| io::Error::new(io::ErrorKind::Other, "unknown"))?
-            {
-                Async::Ready(Some(ref message)) => {
-                    // will return if the socket will block
-                    try_ready!(self.socket.poll_send_to(message.bytes(), &message.addr()));
-                }
-                // now we get to drop through to the receives...
-                // TODO: should we also return None if there are no more messages to send?
-                Async::NotReady | Async::Ready(None) => break,
-            }
+            let addr = &message.addr();
 
-            // now pop the request which is already sent
-            // If it were an Err, it was returned on peeking.
-            self.outbound_messages.poll().expect("Impossible");
+            // this wiil return if not ready,
+            //   meaning that sending will be prefered over receiving...
+
+            // TODO: shouldn't this return the error to send to the sender?
+            ready!(socket.send_to(message.bytes(), addr).poll_unpin(cx))?;
+
+            // message sent, need to pop the message
+            assert!(outbound_messages.as_mut().poll_next(cx).is_ready());
         }
 
         // For QoS, this will only accept one message and output that
         // receive all inbound messages
 
         // TODO: this should match edns settings
-        let mut buf = [0u8; 2048];
+        let mut buf = [0u8; 4096];
+        let (len, src) = ready!(socket.recv_from(&mut buf).poll_unpin(cx))?;
 
-        // TODO: should we drop this packet if it's not from the same src as dest?
-        let (len, src) = try_ready!(self.socket.poll_recv_from(&mut buf));
-        Ok(Async::Ready(Some(SerialMessage::new(
+        Poll::Ready(Some(Ok(SerialMessage::new(
             buf.iter().take(len).cloned().collect(),
             src,
         ))))
@@ -162,7 +174,7 @@ pub(crate) struct NextRandomUdpSocket<S> {
     marker: PhantomData<S>,
 }
 
-impl<S> NextRandomUdpSocket<S> {
+impl<S: UdpSocket> NextRandomUdpSocket<S> {
     /// Creates a future for randomly binding to a local socket address for client connections.
     pub(crate) fn new(name_server: &SocketAddr) -> NextRandomUdpSocket<S> {
         let zero_addr: IpAddr = match *name_server {
@@ -175,16 +187,19 @@ impl<S> NextRandomUdpSocket<S> {
             marker: PhantomData,
         }
     }
+
+    async fn bind(zero_addr: SocketAddr) -> Result<S, io::Error> {
+        S::bind(&zero_addr).await
+    }
 }
 
 impl<S: UdpSocket> Future for NextRandomUdpSocket<S> {
-    type Item = S;
-    type Error = io::Error;
+    type Output = Result<S, io::Error>;
 
     /// polls until there is an available next random UDP port.
     ///
     /// if there is no port available after 10 attempts, returns NotReady
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let rand_port_range = Uniform::new_inclusive(1025_u16, u16::max_value());
         let mut rand = rand::thread_rng();
 
@@ -193,151 +208,78 @@ impl<S: UdpSocket> Future for NextRandomUdpSocket<S> {
             let zero_addr = SocketAddr::new(self.bind_address, port);
 
             // TODO: allow TTL to be adjusted...
-            match S::bind(&zero_addr) {
-                Ok(socket) => {
+            // TODO: this immediate poll might be wrong in some cases...
+            match Box::pin(Self::bind(zero_addr)).as_mut().poll(cx) {
+                Poll::Ready(Ok(socket)) => {
                     debug!("created socket successfully");
-                    return Ok(Async::Ready(socket));
+                    return Poll::Ready(Ok(socket));
                 }
-                Err(err) => debug!("unable to bind port, attempt: {}: {}", attempt, err),
+                Poll::Ready(Err(err)) => {
+                    debug!("unable to bind port, attempt: {}: {}", attempt, err)
+                }
+                Poll::Pending => debug!("unable to bind port, attempt: {}", attempt),
             }
         }
 
         debug!("could not get next random port, delaying");
 
-        task::current().notify();
+        // TODO: because no interest is registered anywhere, we must awake.
+        cx.waker().wake_by_ref();
+
         // returning NotReady here, perhaps the next poll there will be some more socket available.
-        Ok(Async::NotReady)
+        Poll::Pending
     }
 }
 
-#[test]
-fn test_next_random_socket() {
-    use tokio::runtime::current_thread::Runtime;
-
-    let mut io_loop = Runtime::new().unwrap();
-    let (stream, _) = UdpStream::<tokio_udp::UdpSocket>::new(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        52,
-    ));
-    drop(
-        io_loop
-            .block_on(stream)
-            .expect("failed to get next socket address"),
-    );
-}
-
-#[test]
-fn test_udp_stream_ipv4() {
-    udp_stream_test(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
-}
-
-#[test]
-#[cfg(not(target_os = "linux"))] // ignored until Travis-CI fixes IPv6
-fn test_udp_stream_ipv6() {
-    udp_stream_test(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)))
-}
-#[cfg(feature = "tokio-compat")]
-use tokio_udp;
-
-#[cfg(feature = "tokio-compat")]
-impl UdpSocket for tokio_udp::UdpSocket {
-    fn bind(addr: &SocketAddr) -> io::Result<Self> {
-        tokio_udp::UdpSocket::bind(addr)
+#[cfg(feature = "tokio-runtime")]
+#[async_trait]
+impl UdpSocket for tokio::net::UdpSocket {
+    async fn bind(addr: &SocketAddr) -> io::Result<Self> {
+        tokio::net::UdpSocket::bind(addr).await
     }
-    fn poll_recv_from(&mut self, buf: &mut [u8]) -> Poll<(usize, SocketAddr), io::Error> {
-        self.poll_recv_from(buf)
+
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.recv_from(buf).await
     }
-    fn poll_send_to(&mut self, buf: &[u8], target: &SocketAddr) -> Poll<(), io::Error> {
-        self.poll_send_to(buf, target).map(|x| match x {
-            Async::Ready(_) => Async::Ready(()),
-            Async::NotReady => Async::NotReady,
-        })
+
+    async fn send_to(&mut self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
+        self.send_to(buf, target).await
     }
 }
 
 #[cfg(test)]
-fn udp_stream_test(server_addr: IpAddr) {
-    use tokio::runtime::current_thread::Runtime;
+#[cfg(feature = "tokio-runtime")]
+mod tests {
+    #[cfg(not(target_os = "linux"))] // ignored until Travis-CI fixes IPv6
+    use std::net::Ipv6Addr;
+    use std::net::{IpAddr, Ipv4Addr};
+    use tokio::{net::UdpSocket as TokioUdpSocket, runtime::Runtime};
 
-    use std::net::ToSocketAddrs;
-    let succeeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let succeeded_clone = succeeded.clone();
-    std::thread::Builder::new()
-        .name("thread_killer".to_string())
-        .spawn(move || {
-            let succeeded = succeeded_clone.clone();
-            for _ in 0..15 {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if succeeded.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-            }
-
-            panic!("timeout");
-        })
-        .unwrap();
-
-    let server = std::net::UdpSocket::bind(SocketAddr::new(server_addr, 0)).unwrap();
-    server
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap(); // should receive something within 5 seconds...
-    server
-        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap(); // should receive something within 5 seconds...
-    let server_addr = server.local_addr().unwrap();
-
-    let test_bytes: &'static [u8; 8] = b"DEADBEEF";
-    let send_recv_times = 4;
-
-    // an in and out server
-    let server_handle = std::thread::Builder::new()
-        .name("test_udp_stream_ipv4:server".to_string())
-        .spawn(move || {
-            let mut buffer = [0_u8; 512];
-
-            for _ in 0..send_recv_times {
-                // wait for some bytes...
-                let (len, addr) = server.recv_from(&mut buffer).expect("receive failed");
-
-                assert_eq!(&buffer[0..len], test_bytes);
-
-                // bounce them right back...
-                assert_eq!(
-                    server.send_to(&buffer[0..len], addr).expect("send failed"),
-                    len
-                );
-            }
-        })
-        .unwrap();
-
-    // setup the client, which is going to run on the testing thread...
-    let mut io_loop = Runtime::new().unwrap();
-
-    // the tests should run within 5 seconds... right?
-    // TODO: add timeout here, so that test never hangs...
-    let client_addr = match server_addr {
-        std::net::SocketAddr::V4(_) => "127.0.0.1:0",
-        std::net::SocketAddr::V6(_) => "[::1]:0",
-    };
-
-    let socket =
-        tokio_udp::UdpSocket::bind(&client_addr.to_socket_addrs().unwrap().next().unwrap())
-            .expect("could not create socket"); // some random address...
-    let (mut stream, sender) = UdpStream::<tokio_udp::UdpSocket>::with_bound(socket);
-    //let mut stream: UdpStream = io_loop.block_on(stream).ok().unwrap();
-
-    for _ in 0..send_recv_times {
-        // test once
-        sender
-            .unbounded_send(SerialMessage::new(test_bytes.to_vec(), server_addr))
-            .unwrap();
-        let (buffer_and_addr, stream_tmp) = io_loop.block_on(stream.into_future()).ok().unwrap();
-        stream = stream_tmp;
-        let message = buffer_and_addr.expect("no buffer received");
-        assert_eq!(message.bytes(), test_bytes);
-        assert_eq!(message.addr(), server_addr);
+    #[test]
+    fn test_next_random_socket() {
+        use crate::tests::next_random_socket_test;
+        let io_loop = Runtime::new().expect("failed to create tokio runtime");
+        next_random_socket_test::<TokioUdpSocket, Runtime>(io_loop)
     }
 
-    succeeded.store(true, std::sync::atomic::Ordering::Relaxed);
-    server_handle.join().expect("server thread failed");
+    #[test]
+    fn test_udp_stream_ipv4() {
+        use crate::tests::udp_stream_test;
+        let io_loop = Runtime::new().expect("failed to create tokio runtime");
+        udp_stream_test::<TokioUdpSocket, Runtime>(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            io_loop,
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))] // ignored until Travis-CI fixes IPv6
+    fn test_udp_stream_ipv6() {
+        use crate::tests::udp_stream_test;
+        let io_loop = Runtime::new().expect("failed to create tokio runtime");
+        udp_stream_test::<TokioUdpSocket, Runtime>(
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
+            io_loop,
+        );
+    }
 }

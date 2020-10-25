@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use resolv_conf;
 
-use config::*;
-use proto::rr::Name;
+use crate::config::*;
+use crate::proto::rr::Name;
 
 const DEFAULT_PORT: u16 = 53;
 
@@ -64,11 +64,15 @@ fn into_resolver_config(
             socket_addr: SocketAddr::new(ip.into(), DEFAULT_PORT),
             protocol: Protocol::Udp,
             tls_dns_name: None,
+            #[cfg(feature = "dns-over-rustls")]
+            tls_config: None,
         });
         nameservers.push(NameServerConfig {
             socket_addr: SocketAddr::new(ip.into(), DEFAULT_PORT),
             protocol: Protocol::Tcp,
             tls_dns_name: None,
+            #[cfg(feature = "dns-over-rustls")]
+            tls_config: None,
         });
     }
     if nameservers.is_empty() {
@@ -115,21 +119,26 @@ mod tests {
                 socket_addr: addr,
                 protocol: Protocol::Udp,
                 tls_dns_name: None,
+                #[cfg(feature = "dns-over-rustls")]
+                tls_config: None,
             },
             NameServerConfig {
                 socket_addr: addr,
                 protocol: Protocol::Tcp,
                 tls_dns_name: None,
+                #[cfg(feature = "dns-over-rustls")]
+                tls_config: None,
             },
         ]
     }
 
     fn tests_dir() -> String {
-        let server_path = env::var("TDNS_SERVER_SRC_ROOT").unwrap_or_else(|_| ".".to_owned());
-        format!{"{}/../resolver/tests", server_path}
+        let server_path = env::var("TDNS_WORKSPACE_ROOT").unwrap_or_else(|_| "../..".to_owned());
+        format!("{}/crates/resolver/tests", server_path)
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn test_name_server() {
         let parsed = parse_resolv_conf("nameserver 127.0.0.1").expect("failed");
         let mut cfg = empty_config();

@@ -5,107 +5,109 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use futures::{Async, Fuse, Future, IntoFuture, Poll};
+use futures::lock::Mutex;
+use futures::{future::Fuse, ready, Future, FutureExt};
 
 #[allow(clippy::type_complexity)]
+#[must_use = "futures do nothing unless polled"]
 pub struct RcFuture<F: Future>
 where
-    F: Future + Send,
-    F::Item: Clone + Send,
+    F: Future + Send + Unpin,
+    F::Output: Clone + Send,
 {
-    rc_future: Arc<Mutex<Fuse<F>>>,
-    result: Arc<Mutex<Option<Poll<F::Item, F::Error>>>>,
+    future_and_result: Arc<Mutex<(Fuse<F>, Option<F::Output>)>>,
 }
 
-pub fn rc_future<I>(future: I) -> RcFuture<I::Future>
+pub fn rc_future<F>(future: F) -> RcFuture<F>
 where
-    I: IntoFuture,
-    <I as IntoFuture>::Item: Clone + Send,
-    <I as IntoFuture>::Future: Send,
+    F: Future + Unpin,
+    F::Output: Clone + Send,
+    F: Send,
 {
-    let rc_future = Arc::new(Mutex::new(future.into_future().fuse()));
+    let future_and_result = Arc::new(Mutex::new((future.fuse(), None)));
 
-    RcFuture {
-        rc_future,
-        result: Arc::new(Mutex::new(None)),
-    }
+    RcFuture { future_and_result }
 }
 
 impl<F> Future for RcFuture<F>
 where
-    F: Future + Send,
-    F::Item: Clone + Send,
-    F::Error: Clone + Send,
+    F: Future + Send + Unpin,
+    F::Output: Clone + Send,
 {
-    type Item = F::Item;
-    type Error = F::Error;
+    type Output = F::Output;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         // try and get a mutable reference to execute the future
         // at least one caller should be able to get a mut reference... others will
         //  wait for it to complete.
-        if self.result.lock().expect("poisoned").is_some() {
-            return self
-                .result
-                .lock()
-                .expect("poisoned")
-                .as_ref()
-                .unwrap()
-                .clone();
-        }
+        let mut future_and_result = ready!(self.future_and_result.lock().poll_unpin(cx));
+        let (ref mut future, ref mut stored_result) = *future_and_result;
 
-        // TODO convert this to try_borrow_mut when that stabilizes...
-        match self.rc_future.lock().expect("poisoned").poll() {
-            result @ Ok(Async::NotReady) => result,
-            result => {
-                let mut store = self.result.lock().expect("poisoned");
-                *store = Some(result.clone());
-                result
+        // if pending it's either done, or it's actually pending
+        match future.poll_unpin(cx) {
+            Poll::Pending => (),
+            Poll::Ready(result) => {
+                *stored_result = Some(result.clone());
+                return Poll::Ready(result);
             }
+        };
+
+        // check if someone else stored the result
+        if let Some(result) = stored_result.as_ref() {
+            Poll::Ready(result.clone())
+        } else {
+            // the poll on the future should wake this thread
+            Poll::Pending
         }
     }
 }
 
 impl<F> Clone for RcFuture<F>
 where
-    F: Future + Send,
-    F::Item: Clone + Send,
+    F: Future + Send + Unpin,
+    F::Output: Clone + Send + Unpin,
 {
     fn clone(&self) -> Self {
         RcFuture {
-            rc_future: Arc::clone(&self.rc_future),
-            result: Arc::clone(&self.result),
+            future_and_result: Arc::clone(&self.future_and_result),
         }
     }
 }
 
 #[cfg(test)]
-use futures::{failed, finished};
+mod tests {
+    use futures::executor::block_on;
+    use futures::future;
 
-#[test]
-fn test_rc_future() {
-    let future = finished::<usize, usize>(1_usize);
+    use super::*;
 
-    let rc = rc_future(future);
+    #[test]
+    fn test_rc_future() {
+        let future = future::ok::<usize, usize>(1_usize);
 
-    let i = rc.clone().wait().ok().unwrap();
-    assert_eq!(i, 1);
+        let rc = rc_future(future);
 
-    let i = rc.wait().ok().unwrap();
-    assert_eq!(i, 1);
-}
+        let i = block_on(rc.clone()).ok().unwrap();
+        assert_eq!(i, 1);
 
-#[test]
-fn test_rc_future_failed() {
-    let future = failed::<usize, usize>(2);
+        let i = block_on(rc).ok().unwrap();
+        assert_eq!(i, 1);
+    }
 
-    let rc = rc_future(future);
+    #[test]
+    fn test_rc_future_failed() {
+        let future = future::err::<usize, usize>(2);
 
-    let i = rc.clone().wait().err().unwrap();
-    assert_eq!(i, 2);
+        let rc = rc_future(future);
 
-    let i = rc.wait().err().unwrap();
-    assert_eq!(i, 2);
+        let i = block_on(rc.clone()).err().unwrap();
+        assert_eq!(i, 2);
+
+        let i = block_on(rc).err().unwrap();
+        assert_eq!(i, 2);
+    }
 }

@@ -1,11 +1,11 @@
 extern crate futures;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_server;
 
 use std::str::FromStr;
 
-use trust_dns::rr::{LowerName, RecordType};
-use trust_dns::rr::{Name, RrKey};
+use trust_dns_client::rr::{LowerName, RecordType};
+use trust_dns_client::rr::{Name, RrKey};
 use trust_dns_server::authority::ZoneType;
 use trust_dns_server::store::file::{FileAuthority, FileConfig};
 
@@ -34,7 +34,8 @@ dnssec_battery!(file);
 #[test]
 fn test_all_lines_are_loaded() {
     let config = FileConfig {
-        zone_file_path: "tests/named_test_configs/default/nonewline.zone".to_string(),
+        zone_file_path: "../../tests/test-data/named_test_configs/default/nonewline.zone"
+            .to_string(),
     };
 
     let authority = FileAuthority::try_from_config(

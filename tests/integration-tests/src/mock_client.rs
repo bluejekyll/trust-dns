@@ -1,10 +1,11 @@
 use std::net::Ipv4Addr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use futures::{future, Future};
 
-use trust_dns::op::{Message, Query};
-use trust_dns::rr::{Name, RData, Record};
+use trust_dns_client::op::{Message, Query};
+use trust_dns_client::rr::{Name, RData, Record};
 use trust_dns_proto::error::ProtoError;
 use trust_dns_proto::xfer::{DnsHandle, DnsRequest, DnsResponse};
 
@@ -17,6 +18,8 @@ pub struct MockClientHandle<O: OnSend> {
 impl MockClientHandle<DefaultOnSend> {
     /// constructs a new MockClient which returns each Message one after the other
     pub fn mock(messages: Vec<Result<DnsResponse, ProtoError>>) -> Self {
+        println!("MockClientHandle::mock message count: {}", messages.len());
+
         MockClientHandle {
             messages: Arc::new(Mutex::new(messages)),
             on_send: DefaultOnSend,
@@ -27,6 +30,11 @@ impl MockClientHandle<DefaultOnSend> {
 impl<O: OnSend> MockClientHandle<O> {
     /// constructs a new MockClient which returns each Message one after the other
     pub fn mock_on_send(messages: Vec<Result<DnsResponse, ProtoError>>, on_send: O) -> Self {
+        println!(
+            "MockClientHandle::mock_on_send message count: {}",
+            messages.len()
+        );
+
         MockClientHandle {
             messages: Arc::new(Mutex::new(messages)),
             on_send,
@@ -34,12 +42,18 @@ impl<O: OnSend> MockClientHandle<O> {
     }
 }
 
-impl<O: OnSend> DnsHandle for MockClientHandle<O> {
-    type Response = Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>;
+impl<O: OnSend + Unpin> DnsHandle for MockClientHandle<O> {
+    type Response = Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>>;
 
     fn send<R: Into<DnsRequest>>(&mut self, _: R) -> Self::Response {
-        self.on_send
-            .on_send(self.messages.lock().unwrap().pop().unwrap_or_else(empty))
+        let mut messages = self.messages.lock().expect("failed to lock at messages");
+        println!("MockClientHandle::send message count: {}", messages.len());
+
+        self.on_send.on_send(
+            messages.pop().unwrap_or_else(|| {
+                error(ProtoError::from("Messages exhausted in MockClientHandle"))
+            }),
+        )
     }
 }
 
@@ -77,8 +91,8 @@ pub trait OnSend: Clone + Send + Sync + 'static {
     fn on_send(
         &mut self,
         response: Result<DnsResponse, ProtoError>,
-    ) -> Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send> {
-        Box::new(future::result(response))
+    ) -> Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send>> {
+        Box::pin(future::ready(response))
     }
 }
 

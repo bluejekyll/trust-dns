@@ -5,6 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+//! DNS over TLS server implementations for OpenSSL
+
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -17,7 +19,6 @@ pub use openssl::pkcs12::{ParsedPkcs12, Pkcs12};
 pub use openssl::pkey::{PKey, Private};
 pub use openssl::stack::Stack;
 pub use openssl::x509::X509;
-pub use tokio_openssl::SslAcceptorExt;
 
 /// Read the certificate from the specified path.
 ///

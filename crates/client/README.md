@@ -2,13 +2,13 @@
 
 Trust-DNS is a library which implements the DNS protocol and client side functions.
 
-This library contains basic implementations for DNS record serialization, and communication. It is capable of performing `query`, `update`, and `notify` operations. `update` has been proven to be compatible with `BIND9` and `SIG0` signed records for updates. It is built on top of the [tokio](https://tokio.rs) async-io project, this allows it to be integrated into other systems using the tokio and futures libraries. The Trust-DNS [project](https://github.com/bluejekyll/trust-dns) contains other libraries for DNS: a [resolver library](https://crates.io/crates/trust-dns-resolver) for lookups, a [server library](https://crates.io/crates/trust-dns-server) for hosting zones, and variations on the TLS implementation over [rustls](https://crates.io/crates/trust-dns-rustls) and [native-tls](https://crates.io/crates/trust-dns-native-tls).
+This library contains basic implementations for DNS record serialization, and communication. It is capable of performing `query`, `update`, and `notify` operations. `update` has been proven to be compatible with `BIND9` and `SIG0` signed records for updates. It is built on top of the [tokio](https://tokio.rs) async-io project, this allows it to be integrated into other systems using the tokio and futures libraries. The Trust-DNS [project](https://github.com/bluejekyll/trust-dns) contains other libraries for DNS: a [resolver library](https://crates.io/crates/trust-dns-resolver) for lookups, a [server library](https://crates.io/crates/trust-dns) for hosting zones, and variations on the TLS implementation over [rustls](https://crates.io/crates/trust-dns-rustls) and [native-tls](https://crates.io/crates/trust-dns-native-tls).
 
 ## Features
 
 The `client` is capable of DNSSec validation as well as offering higher order functions for performing DNS operations:
 
-- [SecureSyncClient](https://docs.rs/trust-dns/0.11.0/trust_dns/client/struct.SecureSyncClient.html) - DNSSec validation
+- [SyncDnssecClient](https://docs.rs/trust-dns/0.11.0/trust_dns/client/struct.SyncDnssecClient.html) - DNSSec validation
 - [create](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.create) - atomic create of a record, with authenticated request
 - [append](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.append) - verify existence of a record and append to it
 - [compare_and_swap](https://docs.rs/trust-dns/0.11.0/trust_dns/client/trait.Client.html#method.compare_and_swap) - atomic (depends on server) compare and swap
@@ -22,10 +22,10 @@ The `client` is capable of DNSSec validation as well as offering higher order fu
 ```rust
 use std::net::Ipv4Addr;
 use std::str::FromStr;
-use trust_dns::client::{Client, SyncClient};
-use trust_dns::udp::UdpClientConnection;
-use trust_dns::op::DnsResponse;
-use trust_dns::rr::{DNSClass, Name, RData, Record, RecordType};
+use trust_dns_client::client::{Client, SyncClient};
+use trust_dns_client::udp::UdpClientConnection;
+use trust_dns_client::op::DnsResponse;
+use trust_dns_client::rr::{DNSClass, Name, RData, Record, RecordType};
 
 let address = "8.8.8.8:53".parse().unwrap();
 let conn = UdpClientConnection::new(address).unwrap();
@@ -53,6 +53,28 @@ if let &RData::A(ref ip) = answers[0].rdata() {
     assert!(false, "unexpected result")
 }
 ```
+
+## DNS-over-TLS and DNS-over-HTTPS
+
+DoT and DoH are supported. This is accomplished through the use of one of `native-tls`, `openssl`, or `rustls` (only `rustls` is currently supported for DoH).
+
+To use with the `Client`, the `TlsClientConnection` or `HttpsClientConnection` should be used. Similarly, to use with the tokio `AsyncClient` the `TlsClientStream` or `HttpsClientStream` should be used. ClientAuth, mTLS, is currently not supported, there are some issues still being worked on. TLS is useful for Server authentication and connection privacy.
+
+To enable DoT one of the features `dns-over-native-tls`, `dns-over-openssl`, or `dns-over-rustls` must be enabled, `dns-over-https-rustls` is used for DoH.
+
+## DNSSec status
+
+Currently the root key is hardcoded into the system. This gives validation of
+ DNSKEY and DS records back to the root. NSEC is implemented, but not NSEC3.
+ Because caching is not yet enabled, it has been noticed that some DNS servers
+ appear to rate limit the connections, validating RRSIG records back to the root
+ can require a significant number of additional queries for those records.
+
+Zones will be automatically resigned on any record updates via dynamic DNS. To enable DNSSEC, one of the features `dnssec-openssl` or `dnssec-rustls` must be enabled.
+
+## Minimum Rust Version
+
+The current minimum rustc version for this project is `1.40`
 
 ## Versioning
 

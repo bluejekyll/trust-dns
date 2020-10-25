@@ -22,27 +22,32 @@ use openssl::rsa::Rsa as OpenSslRsa;
 use openssl::sign::Signer;
 
 #[cfg(feature = "ring")]
-use ring::{rand,
-           signature::{EcdsaKeyPair, Ed25519KeyPair, KeyPair as RingKeyPair,
-                       ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING}};
+use ring::{
+    rand,
+    signature::{
+        EcdsaKeyPair, Ed25519KeyPair, KeyPair as RingKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING,
+        ECDSA_P384_SHA384_FIXED_SIGNING,
+    },
+};
 
-use error::*;
+use crate::error::*;
 #[cfg(any(feature = "openssl", feature = "ring"))]
-use rr::dnssec::DigestType;
-use rr::dnssec::{Algorithm, PublicKeyBuf};
-use rr::dnssec::{HasPrivate, HasPublic, Private, TBS};
-use rr::rdata::key::KeyUsage;
+use crate::rr::dnssec::DigestType;
+use crate::rr::dnssec::{Algorithm, PublicKeyBuf};
+use crate::rr::dnssec::{HasPrivate, HasPublic, Private, TBS};
+use crate::rr::rdata::key::KeyUsage;
 #[cfg(any(feature = "openssl", feature = "ring"))]
-use rr::rdata::DS;
-use rr::rdata::{DNSKEY, KEY};
+use crate::rr::rdata::DS;
+use crate::rr::rdata::{DNSKEY, KEY};
 #[cfg(any(feature = "openssl", feature = "ring"))]
-use rr::Name;
+use crate::rr::Name;
 
 /// A public and private key pair, the private portion is not required.
 ///
 /// This supports all the various public/private keys which Trust-DNS is capable of using. Given
 ///  differing features, some key types may not be available. The `openssl` feature will enable RSA and EC
 ///  (P256 and P384). The `ring` feature enables ED25519, in the future, Ring will also be used for other keys.
+#[allow(clippy::large_enum_variant)]
 pub enum KeyPair<K> {
     /// RSA keypair, supported by OpenSSL
     #[cfg(feature = "openssl")]
@@ -419,11 +424,7 @@ impl<K: HasPrivate> KeyPair<K> {
             #[cfg(feature = "ring")]
             KeyPair::ECDSA(ref ec_key) => {
                 let rng = rand::SystemRandom::new();
-                Ok(ec_key
-                    .sign(&rng, tbs.as_ref())
-                    .unwrap()
-                    .as_ref()
-                    .to_vec())
+                Ok(ec_key.sign(&rng, tbs.as_ref()).unwrap().as_ref().to_vec())
             }
             #[cfg(feature = "ring")]
             KeyPair::ED25519(ref ed_key) => Ok(ed_key.sign(tbs.as_ref()).as_ref().to_vec()),
@@ -441,9 +442,7 @@ impl KeyPair<Private> {
     /// RSA keys are hardcoded to 2048bits at the moment. Other keys have predefined sizes.
     pub fn generate(algorithm: Algorithm) -> DnsSecResult<Self> {
         match algorithm {
-            Algorithm::Unknown(_) => { 
-                Err(DnsSecErrorKind::Message("unknown algorithm").into())
-            }
+            Algorithm::Unknown(_) => Err(DnsSecErrorKind::Message("unknown algorithm").into()),
             #[cfg(feature = "openssl")]
             Algorithm::RSASHA1
             | Algorithm::RSASHA1NSEC3SHA1
@@ -478,9 +477,7 @@ impl KeyPair<Private> {
     #[cfg(feature = "ring")]
     pub fn generate_pkcs8(algorithm: Algorithm) -> DnsSecResult<Vec<u8>> {
         match algorithm {
-            Algorithm::Unknown(_) => { 
-                Err(DnsSecErrorKind::Message("unknown algorithm").into())
-            }
+            Algorithm::Unknown(_) => Err(DnsSecErrorKind::Message("unknown algorithm").into()),
             #[cfg(feature = "openssl")]
             Algorithm::RSASHA1
             | Algorithm::RSASHA1NSEC3SHA1
@@ -518,8 +515,8 @@ impl KeyPair<Private> {
 #[cfg(any(feature = "openssl", feature = "ring"))]
 #[cfg(test)]
 mod tests {
-    use rr::dnssec::TBS;
-    use rr::dnssec::*;
+    use crate::rr::dnssec::TBS;
+    use crate::rr::dnssec::*;
 
     #[cfg(feature = "openssl")]
     #[test]

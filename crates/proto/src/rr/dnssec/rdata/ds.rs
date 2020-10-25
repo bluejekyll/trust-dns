@@ -123,8 +123,8 @@ impl DS {
     ///    number used by RRSIG and DNSKEY RRs.  Appendix A.1 lists the
     ///    algorithm number types.
     /// ```
-    pub fn algorithm(&self) -> &Algorithm {
-        &self.algorithm
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
     }
 
     /// [RFC 4034, DNSSEC Resource Records, March 2005](https://tools.ietf.org/html/rfc4034#section-5.1.1)
@@ -215,49 +215,53 @@ pub fn emit(encoder: &mut BinEncoder, rdata: &DS) -> ProtoResult<()> {
     Ok(())
 }
 
-#[test]
-pub fn test() {
-    let rdata = DS::new(
-        0xF00F,
-        Algorithm::RSASHA256,
-        DigestType::SHA256,
-        vec![5, 6, 7, 8],
-    );
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::dbg_macro, clippy::print_stdout)]
 
-    let mut bytes = Vec::new();
-    let mut encoder: BinEncoder = BinEncoder::new(&mut bytes);
-    assert!(emit(&mut encoder, &rdata).is_ok());
-    let bytes = encoder.into_bytes();
+    use super::*;
 
-    println!("bytes: {:?}", bytes);
+    #[test]
+    pub fn test() {
+        let rdata = DS::new(
+            0xF00F,
+            Algorithm::RSASHA256,
+            DigestType::SHA256,
+            vec![5, 6, 7, 8],
+        );
 
-    let mut decoder: BinDecoder = BinDecoder::new(bytes);
-    let read_rdata = read(&mut decoder, Restrict::new(bytes.len() as u16));
-    assert!(
-        read_rdata.is_ok(),
-        format!("error decoding: {:?}", read_rdata.unwrap_err())
-    );
-    assert_eq!(rdata, read_rdata.unwrap());
-}
+        let mut bytes = Vec::new();
+        let mut encoder: BinEncoder = BinEncoder::new(&mut bytes);
+        assert!(emit(&mut encoder, &rdata).is_ok());
+        let bytes = encoder.into_bytes();
 
-#[test]
-#[cfg(any(feature = "openssl", feature = "ring"))]
-pub fn test_covers() {
-    use crate::rr::dnssec::rdata::DNSKEY;
+        println!("bytes: {:?}", bytes);
 
-    let name = Name::parse("www.example.com.", None).unwrap();
+        let mut decoder: BinDecoder = BinDecoder::new(bytes);
+        let restrict = Restrict::new(bytes.len() as u16);
+        let read_rdata = read(&mut decoder, restrict).expect("Decoding error");
+        assert_eq!(rdata, read_rdata);
+    }
 
-    let dnskey_rdata = DNSKEY::new(true, true, false, Algorithm::RSASHA256, vec![1, 2, 3, 4]);
-    let ds_rdata = DS::new(
-        0,
-        Algorithm::RSASHA256,
-        DigestType::SHA256,
-        dnskey_rdata
-            .to_digest(&name, DigestType::SHA256)
-            .unwrap()
-            .as_ref()
-            .to_owned(),
-    );
+    #[test]
+    #[cfg(any(feature = "openssl", feature = "ring"))]
+    pub fn test_covers() {
+        use crate::rr::dnssec::rdata::DNSKEY;
 
-    assert!(ds_rdata.covers(&name, &dnskey_rdata).unwrap());
+        let name = Name::parse("www.example.com.", None).unwrap();
+
+        let dnskey_rdata = DNSKEY::new(true, true, false, Algorithm::RSASHA256, vec![1, 2, 3, 4]);
+        let ds_rdata = DS::new(
+            0,
+            Algorithm::RSASHA256,
+            DigestType::SHA256,
+            dnskey_rdata
+                .to_digest(&name, DigestType::SHA256)
+                .unwrap()
+                .as_ref()
+                .to_owned(),
+        );
+
+        assert!(ds_rdata.covers(&name, &dnskey_rdata).unwrap());
+    }
 }

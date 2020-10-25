@@ -9,13 +9,13 @@ use std::io;
 use std::net::SocketAddr;
 
 use proto::xfer::SerialMessage;
-use trust_dns::serialize::binary::BinEncoder;
-use trust_dns::BufStreamHandle;
+use trust_dns_client::serialize::binary::BinEncoder;
+use trust_dns_proto::BufStreamHandle;
 
-use authority::MessageResponse;
+use crate::authority::MessageResponse;
 
 /// A handler for send a response to a client
-pub trait ResponseHandler: Clone + Send + 'static {
+pub trait ResponseHandler: Clone + Send + Unpin + 'static {
     // TODO: add associated error type
     //type Error;
 

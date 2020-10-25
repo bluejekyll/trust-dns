@@ -7,7 +7,10 @@
 
 //! `RetryDnsHandle` allows for DnsQueries to be reattempted on failure
 
-use futures::{Future, Poll};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use futures_util::future::{Future, FutureExt};
 
 use crate::error::ProtoError;
 use crate::xfer::{DnsRequest, DnsResponse};
@@ -18,12 +21,12 @@ use crate::DnsHandle;
 /// *note* Current value of this is not clear, it may be removed
 #[derive(Clone)]
 #[must_use = "queries can only be sent through a ClientHandle"]
-pub struct RetryDnsHandle<H: DnsHandle> {
+pub struct RetryDnsHandle<H: DnsHandle + Unpin + Send> {
     handle: H,
     attempts: usize,
 }
 
-impl<H: DnsHandle> RetryDnsHandle<H> {
+impl<H: DnsHandle + Unpin> RetryDnsHandle<H> {
     /// Creates a new Client handler for reattempting requests on failures.
     ///
     /// # Arguments
@@ -37,9 +40,9 @@ impl<H: DnsHandle> RetryDnsHandle<H> {
 
 impl<H> DnsHandle for RetryDnsHandle<H>
 where
-    H: DnsHandle + 'static,
+    H: DnsHandle + Send + Unpin + 'static,
 {
-    type Response = Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>;
+    type Response = Pin<Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send + Unpin>>;
 
     fn send<R: Into<DnsRequest>>(&mut self, request: R) -> Self::Response {
         let request = request.into();
@@ -48,7 +51,7 @@ where
         //  obviously it would be nice to be lazy about this...
         let future = self.handle.send(request.clone());
 
-        Box::new(RetrySendFuture {
+        Box::pin(RetrySendFuture {
             request,
             handle: self.handle.clone(),
             future,
@@ -65,26 +68,26 @@ struct RetrySendFuture<H: DnsHandle> {
     remaining_attempts: usize,
 }
 
-impl<H: DnsHandle> Future for RetrySendFuture<H> {
-    type Item = DnsResponse;
-    type Error = ProtoError;
+impl<H: DnsHandle + Unpin> Future for RetrySendFuture<H> {
+    type Output = Result<DnsResponse, ProtoError>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         // loop over the future, on errors, spawn a new future
         //  on ready and not ready return.
         loop {
-            match self.future.poll() {
-                r @ Ok(_) => return r,
-                Err(e) => {
+            match self.future.poll_unpin(cx) {
+                Poll::Ready(Err(e)) => {
                     if self.remaining_attempts == 0 {
-                        return Err(e);
+                        return Poll::Ready(Err(e));
                     }
 
                     self.remaining_attempts -= 1;
-                    // FIXME: if the "sent" Message is part of the error result,
+                    // TODO: if the "sent" Message is part of the error result,
                     //  then we can just reuse it... and no clone necessary
-                    self.future = self.handle.send(self.request.clone());
+                    let request = self.request.clone();
+                    self.future = self.handle.send(request);
                 }
+                poll => return poll,
             }
         }
     }
@@ -94,32 +97,36 @@ impl<H: DnsHandle> Future for RetrySendFuture<H> {
 mod test {
     use super::*;
     use crate::error::*;
-    use futures::*;
     use crate::op::*;
-    use std::cell::Cell;
+    use futures_executor::block_on;
+    use futures_util::future::*;
+    use std::sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc,
+    };
     use DnsHandle;
 
     #[derive(Clone)]
     struct TestClient {
         last_succeed: bool,
         retries: u16,
-        attempts: Cell<u16>,
+        attempts: Arc<AtomicU16>,
     }
 
     impl DnsHandle for TestClient {
-        type Response = Box<dyn Future<Item = DnsResponse, Error = ProtoError> + Send>;
+        type Response = Box<dyn Future<Output = Result<DnsResponse, ProtoError>> + Send + Unpin>;
 
         fn send<R: Into<DnsRequest>>(&mut self, _: R) -> Self::Response {
-            let i = self.attempts.get();
+            let i = self.attempts.load(Ordering::SeqCst);
 
             if (i > self.retries || self.retries - i == 0) && self.last_succeed {
                 let mut message = Message::new();
                 message.set_id(i);
-                return Box::new(finished(message.into()));
+                return Box::new(ok(message.into()));
             }
 
-            self.attempts.set(i + 1);
-            Box::new(failed(ProtoError::from("last retry set to fail")))
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Box::new(err(ProtoError::from("last retry set to fail")))
         }
     }
 
@@ -129,12 +136,12 @@ mod test {
             TestClient {
                 last_succeed: true,
                 retries: 1,
-                attempts: Cell::new(0),
+                attempts: Arc::new(AtomicU16::new(0)),
             },
             2,
         );
         let test1 = Message::new();
-        let result = handle.send(test1).wait().expect("should have succeeded");
+        let result = block_on(handle.send(test1)).expect("should have succeeded");
         assert_eq!(result.id(), 1); // this is checking the number of iterations the TestClient ran
     }
 
@@ -144,11 +151,11 @@ mod test {
             TestClient {
                 last_succeed: false,
                 retries: 1,
-                attempts: Cell::new(0),
+                attempts: Arc::new(AtomicU16::new(0)),
             },
             2,
         );
         let test1 = Message::new();
-        assert!(client.send(test1).wait().is_err());
+        assert!(block_on(client.send(test1)).is_err());
     }
 }

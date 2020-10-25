@@ -403,7 +403,8 @@ impl<'k> PublicKey for Rsa<'k> {
             n: self.pkey.n(),
             e: self.pkey.e(),
         };
-        public_key.verify(alg, message, signature)
+        public_key
+            .verify(alg, message, signature)
             .map_err(Into::into)
     }
 }
@@ -429,7 +430,7 @@ pub enum PublicKeyEnum<'k> {
 
 impl<'k> PublicKeyEnum<'k> {
     /// Converts the bytes into a PulbicKey of the specified algorithm
-    #[allow(unused_variables)]
+    #[allow(unused_variables, clippy::match_single_binding)]
     pub fn from_public_bytes(public_key: &'k [u8], algorithm: Algorithm) -> ProtoResult<Self> {
         match algorithm {
             #[cfg(any(feature = "openssl", feature = "ring"))]
@@ -451,6 +452,7 @@ impl<'k> PublicKeyEnum<'k> {
 }
 
 impl<'k> PublicKey for PublicKeyEnum<'k> {
+    #[allow(clippy::match_single_binding, clippy::match_single_binding)]
     fn public_bytes(&self) -> &[u8] {
         match *self {
             #[cfg(any(feature = "openssl", feature = "ring"))]
@@ -464,7 +466,7 @@ impl<'k> PublicKey for PublicKeyEnum<'k> {
         }
     }
 
-    #[allow(unused_variables)]
+    #[allow(unused_variables, clippy::match_single_binding)]
     fn verify(&self, algorithm: Algorithm, message: &[u8], signature: &[u8]) -> ProtoResult<()> {
         match *self {
             #[cfg(any(feature = "openssl", feature = "ring"))]
@@ -529,5 +531,4 @@ mod tests {
         test_case(&[0x80, 0x00, 0x80], &[0x00, 0x80, 0x00, 0x80]);
         test_case(&[0xff, 0x00, 0x80], &[0x00, 0xff, 0x00, 0x80]);
     }
-
 }

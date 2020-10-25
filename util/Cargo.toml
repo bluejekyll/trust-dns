@@ -1,7 +1,8 @@
 [package]
 name = "trust-dns-util"
-version = "0.5.0"
+version = "0.20.0"
 authors = ["Benjamin Fry <benjaminfry@me.com>"]
+edition = "2018"
 
 # A short blurb about the package. This is not rendered in any format when
 # uploaded to crates.io (aka this is not markdown)
@@ -30,9 +31,9 @@ categories = ["network-programming"]
 license = "MIT/Apache-2.0"
 
 [badges]
-travis-ci = { repository = "bluejekyll/trust-dns" }
-appveyor = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+#github-actions = { repository = "bluejekyll/trust-dns", branch = "master", workflow = "test" }
 codecov = { repository = "bluejekyll/trust-dns", branch = "master", service = "github" }
+maintenance = { status = "actively-developed" }
 
 [[bin]]
 name = "dnskey-to-pem"
@@ -47,11 +48,11 @@ name = "pem-to-public-dnskey"
 path = "src/pem_to_public_dnskey.rs"
 
 [dependencies]
-clap = "2.33.0"
-data-encoding = "2.1.0"
-trust-dns = { version = "0.17.0", features = ["dnssec-openssl"], path = "../crates/client" }
-trust-dns-proto = { version = "0.8.0", features = ["dnssec-openssl"], path = "../crates/proto" }
-trust-dns-resolver = { version = "0.12.0", features = ["dnssec-openssl"], path = "../crates/resolver" }
-env_logger = "0.6"
-log = "0.4.8"
+clap = "2.33.1"
+data-encoding = "2.2.0"
+trust-dns-client= { version = "0.20.0", features = ["dnssec-openssl"], path = "../crates/client" }
+trust-dns-proto = { version = "0.20.0", features = ["dnssec-openssl"], path = "../crates/proto" }
+trust-dns-resolver = { version = "0.20.0", features = ["dnssec-openssl"], path = "../crates/resolver" }
+env_logger = "0.7"
+log = "0.4"
 openssl = { version = "0.10", features = ["v102", "v110"] }

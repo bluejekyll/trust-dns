@@ -7,10 +7,11 @@
 
 //! Configuration for the stores
 
-use store::file::FileConfig;
+use crate::store::file::FileConfig;
 #[cfg(feature = "trust-dns-resolver")]
-use store::forwarder::ForwardConfig;
-use store::sqlite::SqliteConfig;
+use crate::store::forwarder::ForwardConfig;
+#[cfg(feature = "sqlite")]
+use crate::store::sqlite::SqliteConfig;
 
 /// Enumeration over all Store configurations
 #[derive(Deserialize, PartialEq, Debug)]
@@ -20,6 +21,7 @@ pub enum StoreConfig {
     /// File based configuration
     File(FileConfig),
     /// Sqlite based configuration file
+    #[cfg(feature = "sqlite")]
     Sqlite(SqliteConfig),
     /// Forwarder, aka Resolver
     #[cfg(feature = "trust-dns-resolver")]

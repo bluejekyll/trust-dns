@@ -13,7 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#![warn(missing_docs)]
+#![allow(
+    clippy::needless_doctest_main,
+    clippy::unknown_clippy_lints,
+    clippy::single_component_path_imports
+)]
+#![warn(
+    missing_docs,
+    clippy::dbg_macro,
+    clippy::print_stdout,
+    clippy::unimplemented
+)]
 #![recursion_limit = "1024"]
 
 //! Trust-DNS is intended to be a fully compliant domain name server and client library.
@@ -41,33 +51,28 @@
 //!
 //! ```toml
 //! [dependencies]
-//! trust-dns = "^0.14"
+//! trust-dns-client = "*"
 //! ```
 //!
 //! By default DNSSec validation is built in with OpenSSL, this can be disabled with:
 //!
 //! ```toml
 //! [dependencies]
-//! trust-dns = { version = "0.10", default-features = false }
-//! ```
-//!
-//! Extern the crate into your program or library:
-//!
-//! ```rust
-//! extern crate trust_dns;
+//! trust-dns-client = { version = "*", default-features = false }
 //! ```
 //!
 //! ## Objects
 //!
-//! There are two variations of implementations of the Client. The `SyncClient`, a synchronous client, and the `ClientFuture`, a Tokio async client. `SyncClient` is an implementation of the `Client` trait, there is another implementation, `SecureSyncClient`, which validates DNSSec records. For these basic examples we'll only look at the `SyncClient`
+//! There are two variations of implementations of the Client. The `SyncClient`, a synchronous client, and the `AsyncClient`, a Tokio async client. `SyncClient` is an implementation of the `Client` trait, there is another implementation, `SyncDnssecClient`, which validates DNSSec records. For these basic examples we'll only look at the `SyncClient`
 //!
 //! First we must decide on the type of connection, there are three supported by Trust-DNS today, UDP, TCP and TLS. TLS requires OpenSSL by default, see also [trust-dns-native-tls](https://docs.rs/trust-dns-native-tls) and [trust-dns-rustls](https://docs.rs/trust-dns-rustls) for other TLS options.
 //!
 //! ## Setup a connection
 //!
 //! ```rust
-//! use trust_dns::client::{Client, ClientConnection, ClientStreamHandle, SyncClient};
-//! use trust_dns::udp::UdpClientConnection;
+//! use trust_dns_proto::DnsStreamHandle;
+//! use trust_dns_client::client::{Client, ClientConnection, SyncClient};
+//! use trust_dns_client::udp::UdpClientConnection;
 //!
 //! let address = "8.8.8.8:53".parse().unwrap();
 //! let conn = UdpClientConnection::new(address).unwrap();
@@ -76,7 +81,7 @@
 //! let client = SyncClient::new(conn);
 //! ```
 //!
-//! At this point the client is ready to be used. See also `client::SecureSyncClient` for DNSSec validation. The rest of these examples will assume that the above boilerplate has already been performed.
+//! At this point the client is ready to be used. See also `client::SyncDnssecClient` for DNSSec validation. The rest of these examples will assume that the above boilerplate has already been performed.
 //!
 //! ## Querying
 //!
@@ -85,10 +90,10 @@
 //! ```rust
 //! use std::net::Ipv4Addr;
 //! use std::str::FromStr;
-//! # use trust_dns::client::{Client, SyncClient};
-//! # use trust_dns::udp::UdpClientConnection;
-//! use trust_dns::op::DnsResponse;
-//! use trust_dns::rr::{DNSClass, Name, RData, Record, RecordType};
+//! # use trust_dns_client::client::{Client, SyncClient};
+//! # use trust_dns_client::udp::UdpClientConnection;
+//! use trust_dns_client::op::DnsResponse;
+//! use trust_dns_client::rr::{DNSClass, Name, RData, Record, RecordType};
 //! #
 //! # let address = "8.8.8.8:53".parse().unwrap();
 //! # let conn = UdpClientConnection::new(address).unwrap();
@@ -104,7 +109,7 @@
 //! // Messages are the packets sent between client and server in DNS.
 //! //  there are many fields to a Message, DnsResponse can be dereferenced into
 //! //  a Message. It's beyond the scope of these examples
-//! //  to explain all the details of a Message. See trust_dns::op::message::Message for more details.
+//! //  to explain all the details of a Message. See trust_dns_client::op::message::Message for more details.
 //! //  generally we will be interested in the Message::answers
 //! let answers: &[Record] = response.answers();
 //!
@@ -118,18 +123,14 @@
 //! }
 //! ```
 //!
-//! In the above example we successfully queried for a A record. There are many other types, each can be independently queried and the associated `trust_dns::rr::record_data::RData` has a variant with the deserialized data for the record stored.
+//! In the above example we successfully queried for a A record. There are many other types, each can be independently queried and the associated `trust_dns_client::rr::record_data::RData` has a variant with the deserialized data for the record stored.
 //!
 //! ## Dynamic update
 //!
-//! Currently `trust-dns` supports SIG(0) signed records for authentication and authorization of dynamic DNS updates. It's beyond the scope of these examples to show how to setup SIG(0) authorization on the server. `trust-dns` is known to work with BIND9 and `trust-dns-server`. Expect in the future for TLS to become a potentially better option for authorization with certificate chains. These examples show using SIG(0) for auth, requires OpenSSL. It's beyond the scope of these examples to describe the configuration for the server.
+//! Currently `trust-dns-client` supports SIG(0) signed records for authentication and authorization of dynamic DNS updates. It's beyond the scope of these examples to show how to setup SIG(0) authorization on the server. `trust-dns-client` is known to work with BIND9 and `trust-dns-server`. Expect in the future for TLS to become a potentially better option for authorization with certificate chains. These examples show using SIG(0) for auth, requires OpenSSL. It's beyond the scope of these examples to describe the configuration for the server.
 
 //!
 //! ```rust,no_run
-//! # extern crate chrono;
-//! # extern crate openssl;
-//! # extern crate trust_dns;
-//!
 //! use std::fs::File;
 //! use std::io::Read;
 //! use std::net::Ipv4Addr;
@@ -138,13 +139,13 @@
 //! use chrono::Duration;
 //! # #[cfg(feature = "openssl")]
 //! use openssl::rsa::Rsa;
-//! # use trust_dns::client::Client;
-//! # use trust_dns::udp::UdpClientConnection;
-//! use trust_dns::client::SyncClient;
-//! use trust_dns::rr::{Name, RData, Record, RecordType};
-//! use trust_dns::rr::dnssec::{Algorithm, Signer, KeyPair};
-//! use trust_dns::op::ResponseCode;
-//! use trust_dns::rr::rdata::key::KEY;
+//! # use trust_dns_client::client::Client;
+//! # use trust_dns_client::udp::UdpClientConnection;
+//! use trust_dns_client::client::SyncClient;
+//! use trust_dns_client::rr::{Name, RData, Record, RecordType};
+//! use trust_dns_client::rr::dnssec::{Algorithm, Signer, KeyPair};
+//! use trust_dns_client::op::ResponseCode;
+//! use trust_dns_client::rr::rdata::key::KEY;
 //!
 //! # #[cfg(feature = "openssl")]
 //! # fn main() {
@@ -210,20 +211,16 @@
 //! The below example uses a single threaded tokio runtime example for the client. Tokio can get much more complex with multiple runtimes on many threads. This example is meant to show basic usage, the Tokio documentation should be reviewed for more advanced usage.
 //!
 //! ```rust
-//! # extern crate tokio;
-//! # extern crate tokio_udp;
-//! # extern crate trust_dns;
-//!
 //! use std::net::{Ipv4Addr, SocketAddr};
 //! use std::str::FromStr;
-//! use tokio_udp::UdpSocket;
-//! use tokio::runtime::current_thread::Runtime;
+//! use tokio::net::UdpSocket;
+//! use tokio::runtime::Runtime;
 //!
-//! use trust_dns::udp::UdpClientStream;
-//! use trust_dns::client::{Client, ClientFuture, ClientHandle};
-//! use trust_dns::rr::{DNSClass, Name, RData, Record, RecordType};
-//! use trust_dns::op::ResponseCode;
-//! use trust_dns::rr::rdata::key::KEY;
+//! use trust_dns_client::udp::UdpClientStream;
+//! use trust_dns_client::client::{Client, AsyncClient, ClientHandle};
+//! use trust_dns_client::rr::{DNSClass, Name, RData, Record, RecordType};
+//! use trust_dns_client::op::ResponseCode;
+//! use trust_dns_client::rr::rdata::key::KEY;
 //!
 //! // We'll be using the current threads Tokio Runtime
 //! let mut runtime = Runtime::new().unwrap();
@@ -237,9 +234,12 @@
 //! //   the client is a handle to an unbounded queue for sending requests via the
 //! //   background. The background must be scheduled to run before the client can
 //! //   send any dns requests
-//! let (bg, mut client) = ClientFuture::connect(stream);
+//! let client = AsyncClient::connect(stream);
 //!
-//! // run the background task
+//! // await the connection to be established
+//! let (mut client, bg) = runtime.block_on(client).expect("connection failed");
+//!
+//! // make sure to run the background task
 //! runtime.spawn(bg);
 //!
 //! // Create a query future
@@ -253,42 +253,6 @@
 //!     assert_eq!(addr, Ipv4Addr::new(93, 184, 216, 34));
 //! }
 //! ```
-
-extern crate chrono;
-extern crate data_encoding;
-#[macro_use]
-extern crate data_encoding_macro;
-extern crate failure;
-#[macro_use]
-extern crate futures;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-#[cfg(feature = "native-tls")]
-extern crate native_tls;
-#[cfg(feature = "openssl")]
-extern crate openssl;
-extern crate radix_trie;
-extern crate rand;
-#[cfg(feature = "ring")]
-extern crate ring;
-#[cfg(feature = "dns-over-https-rustls")]
-extern crate rustls;
-#[cfg(feature = "serde-config")]
-extern crate serde;
-extern crate tokio;
-#[cfg(feature = "tokio-openssl")]
-extern crate tokio_openssl;
-extern crate tokio_tcp;
-#[cfg(feature = "tokio-tls")]
-extern crate tokio_tls;
-extern crate tokio_udp;
-#[cfg(feature = "dns-over-https")]
-extern crate trust_dns_https;
-pub extern crate trust_dns_proto as proto;
-#[cfg(feature = "dns-over-https")]
-extern crate webpki;
 
 pub mod client;
 pub mod error;
@@ -304,20 +268,13 @@ pub mod udp;
 #[cfg(feature = "dns-over-https")]
 mod https_client_connection;
 
+pub use trust_dns_proto as proto;
+
 /// The https module which contains all https related connection types
 #[cfg(feature = "dns-over-https")]
 pub mod https {
     pub use super::https_client_connection::HttpsClientConnection;
 }
-
-/// A sender to which serialized DNS Messages can be sent
-#[deprecated(note = "use [`trust_dns_proto::BufDnsStreamHandle`] instead")]
-pub use proto::BufStreamHandle;
-
-/// A sender to which a Message can be sent
-// pub type MessageStreamHandle = UnboundedSender<Message>;
-#[deprecated(note = "use [`trust_dns_proto::BufDnsStreamHandle`] instead")]
-pub use proto::BufDnsStreamHandle as BufClientStreamHandle;
 
 /// Returns a version as specified in Cargo.toml
 pub fn version() -> &'static str {

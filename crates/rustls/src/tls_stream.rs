@@ -5,29 +5,41 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+//! DNS over TLS I/O stream implementation for Rustls
+
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::sync::mpsc::unbounded;
-use futures::{Future, IntoFuture};
+use futures::channel::mpsc::{unbounded, UnboundedReceiver};
+use futures::{Future, TryFutureExt};
 use rustls::ClientConfig;
+use tokio;
+use tokio::net::TcpStream as TokioTcpStream;
 use tokio_rustls::TlsConnector;
-use tokio_tcp::TcpStream as TokioTcpStream;
 use webpki::{DNSName, DNSNameRef};
 
+use trust_dns_proto::iocompat::AsyncIo02As03;
 use trust_dns_proto::tcp::TcpStream;
-use trust_dns_proto::xfer::BufStreamHandle;
+use trust_dns_proto::xfer::{BufStreamHandle, SerialMessage};
 
+/// Predefined type for abstracting the TlsClientStream with TokioTls
 pub type TokioTlsClientStream = tokio_rustls::client::TlsStream<TokioTcpStream>;
+
+/// Predefined type for abstracting the TlsServerStream with TokioTls
 pub type TokioTlsServerStream = tokio_rustls::server::TlsStream<TokioTcpStream>;
 
+/// Predefined type for abstracting the base I/O TlsStream with TokioTls
 pub type TlsStream<S> = TcpStream<S>;
 
 /// Initializes a TlsStream with an existing tokio_tls::TlsStream.
 ///
 /// This is intended for use with a TlsListener and Incoming connections
-pub fn tls_from_stream<S>(stream: S, peer_addr: SocketAddr) -> (TlsStream<S>, BufStreamHandle) {
+pub fn tls_from_stream<S: futures::io::AsyncRead + futures::io::AsyncWrite>(
+    stream: S,
+    peer_addr: SocketAddr,
+) -> (TlsStream<S>, BufStreamHandle) {
     let (message_sender, outbound_messages) = unbounded();
     let message_sender = BufStreamHandle::new(message_sender);
 
@@ -61,50 +73,63 @@ pub fn tls_from_stream<S>(stream: S, peer_addr: SocketAddr) -> (TlsStream<S>, Bu
 ///
 /// * `name_server` - IP and Port for the remote DNS resolver
 /// * `dns_name` - The DNS name,  Subject Public Key Info (SPKI) name, as associated to a certificate
+#[allow(clippy::type_complexity)]
 pub fn tls_connect(
     name_server: SocketAddr,
     dns_name: String,
     client_config: Arc<ClientConfig>,
 ) -> (
-    Box<dyn Future<Item = TlsStream<TokioTlsClientStream>, Error = io::Error> + Send>,
+    Pin<
+        Box<
+            dyn Future<Output = Result<TlsStream<AsyncIo02As03<TokioTlsClientStream>>, io::Error>>
+                + Send,
+        >,
+    >,
     BufStreamHandle,
 ) {
     let (message_sender, outbound_messages) = unbounded();
     let message_sender = BufStreamHandle::new(message_sender);
 
-    let tls_connector = TlsConnector::from(client_config);
-    let tcp = TokioTcpStream::connect(&name_server);
+    let early_data_enabled = client_config.enable_early_data;
+    let tls_connector = TlsConnector::from(client_config).early_data(early_data_enabled);
 
     // This set of futures collapses the next tcp socket into a stream which can be used for
     //  sending and receiving tcp packets.
-    let stream: Box<dyn Future<Item = TlsStream<TokioTlsClientStream>, Error = io::Error> + Send> = Box::new(
-        tcp.and_then(move |tcp_stream| {
-            let dns_name = DNSNameRef::try_from_ascii_str(&dns_name).map(DNSName::from);
+    let stream = Box::pin(connect_tls(
+        tls_connector,
+        name_server,
+        dns_name,
+        outbound_messages,
+    ));
 
-            dns_name
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad dns_name"))
-                .into_future()
-                .and_then(move |dns_name| {
-                    tls_connector
-                        .connect(dns_name.as_ref(), tcp_stream)
-                        .map(move |s| {
-                            TcpStream::from_stream_with_receiver(s, name_server, outbound_messages)
-                        })
-                        .map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::ConnectionRefused,
-                                format!("tls error: {}", e),
-                            )
-                        })
-                })
-        })
+    (stream, message_sender)
+}
+
+async fn connect_tls(
+    tls_connector: TlsConnector,
+    name_server: SocketAddr,
+    dns_name: String,
+    outbound_messages: UnboundedReceiver<SerialMessage>,
+) -> io::Result<TcpStream<AsyncIo02As03<TokioTlsClientStream>>> {
+    let tcp = TokioTcpStream::connect(&name_server).await?;
+
+    let dns_name = DNSNameRef::try_from_ascii_str(&dns_name)
+        .map(DNSName::from)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad dns_name"))?;
+
+    let s = tls_connector
+        .connect(dns_name.as_ref(), tcp)
         .map_err(|e| {
             io::Error::new(
                 io::ErrorKind::ConnectionRefused,
                 format!("tls error: {}", e),
             )
-        }),
-    );
+        })
+        .await?;
 
-    (stream, message_sender)
+    Ok(TcpStream::from_stream_with_receiver(
+        AsyncIo02As03(s),
+        name_server,
+        outbound_messages,
+    ))
 }

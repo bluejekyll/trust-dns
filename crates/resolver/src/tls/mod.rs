@@ -13,7 +13,7 @@ mod dns_over_rustls;
 
 cfg_if! {
     if #[cfg(feature = "dns-over-rustls")] {
-        pub(crate) use self::dns_over_rustls::new_tls_stream;
+        pub(crate) use self::dns_over_rustls::{new_tls_stream, CLIENT_CONFIG};
     } else if #[cfg(feature = "dns-over-native-tls")] {
         pub(crate) use self::dns_over_native_tls::new_tls_stream;
     } else if #[cfg(feature = "dns-over-openssl")] {
@@ -29,17 +29,18 @@ mod tests {
     extern crate env_logger;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use tokio::runtime::current_thread::Runtime;
+    use tokio::runtime::Runtime;
 
-    use config::{ResolverConfig, ResolverOpts};
-    use AsyncResolver;
+    use crate::config::{ResolverConfig, ResolverOpts};
+    use crate::TokioAsyncResolver;
 
     fn tls_test(config: ResolverConfig) {
-        env_logger::try_init().ok();
+        //env_logger::try_init().ok();
         let mut io_loop = Runtime::new().unwrap();
 
-        let (resolver, bg) = AsyncResolver::new(config, ResolverOpts::default());
-        io_loop.spawn(bg);
+        let resolver =
+            TokioAsyncResolver::new(config, ResolverOpts::default(), io_loop.handle().clone())
+                .expect("failed to create resolver");
 
         let response = io_loop
             .block_on(resolver.lookup_ip("www.example.com."))
@@ -71,5 +72,4 @@ mod tests {
     fn test_quad9_tls() {
         tls_test(ResolverConfig::quad9_tls())
     }
-
 }

@@ -7,18 +7,21 @@
 use std;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::{Async, Future, Poll, Stream};
+use futures::{future, Future, FutureExt, StreamExt};
 
 #[cfg(feature = "dns-over-rustls")]
 use rustls::{Certificate, PrivateKey};
-use tokio_executor;
-use tokio_reactor::Handle;
-use tokio_tcp;
-use tokio_udp;
+use tokio::net;
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 
+use proto::error::ProtoError;
+use proto::iocompat::AsyncIo02As03;
 use proto::op::Edns;
 use proto::serialize::binary::{BinDecodable, BinDecoder};
 use proto::tcp::TcpStream;
@@ -28,14 +31,15 @@ use proto::BufStreamHandle;
 #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
 use trust_dns_openssl::tls_server::*;
 
-use authority::MessageRequest;
-use server::{Request, RequestHandler, ResponseHandle, ResponseHandler, TimeoutStream};
+use crate::authority::MessageRequest;
+use crate::server::{Request, RequestHandler, ResponseHandle, ResponseHandler, TimeoutStream};
 
 // TODO, would be nice to have a Slab for buffers here...
 
 /// A Futures based implementation of a DNS server
 pub struct ServerFuture<T: RequestHandler> {
     handler: Arc<Mutex<T>>,
+    joins: Vec<JoinHandle<Result<(), ProtoError>>>,
 }
 
 impl<T: RequestHandler> ServerFuture<T> {
@@ -43,35 +47,56 @@ impl<T: RequestHandler> ServerFuture<T> {
     pub fn new(handler: T) -> ServerFuture<T> {
         ServerFuture {
             handler: Arc::new(Mutex::new(handler)),
+            joins: vec![],
         }
     }
 
     /// Register a UDP socket. Should be bound before calling this function.
-    pub fn register_socket(&self, socket: tokio_udp::UdpSocket) {
-        debug!("registered udp: {:?}", socket);
+    pub fn register_socket(&mut self, socket: net::UdpSocket) {
+        debug!("registering udp: {:?}", socket);
+
+        let spawner = Handle::current();
 
         // create the new UdpStream
-        let (buf_stream, stream_handle) = UdpStream::with_bound(socket);
+        let (mut buf_stream, stream_handle) = UdpStream::with_bound(socket);
         //let request_stream = RequestStream::new(buf_stream, stream_handle);
         let handler = self.handler.clone();
 
         // this spawns a ForEach future which handles all the requests into a Handler.
-        tokio_executor::spawn(
-            buf_stream
-                .map_err(|e| panic!("error in UDP request_stream handler: {}", e))
-                .for_each(move |message| {
+        let join_handle = spawner.spawn({
+            let spawner = spawner.clone();
+
+            async move {
+                while let Some(message) = buf_stream.next().await {
+                    let message = match message {
+                        Err(e) => {
+                            warn!("error receiving message on udp_socket: {}", e);
+                            continue;
+                        }
+                        Ok(message) => message,
+                    };
+
                     let src_addr = message.addr();
                     debug!("received udp request from: {}", src_addr);
-                    self::handle_raw_request(message, handler.clone(), stream_handle.clone())
-                }),
-        );
+                    let handler = handler.clone();
+                    let stream_handle = stream_handle.clone();
+
+                    spawner.spawn(async move {
+                        self::handle_raw_request(message, handler, stream_handle).await;
+                    });
+                }
+
+                // TODO: let's consider capturing all the initial configuration details so that the socket could be recreated...
+                Err(ProtoError::from("unexpected close of UDP socket"))
+            }
+        });
+
+        self.joins.push(join_handle);
     }
 
     /// Register a UDP socket. Should be bound before calling this function.
-    pub fn register_socket_std(&self, socket: std::net::UdpSocket) {
-        self.register_socket(
-            tokio_udp::UdpSocket::from_std(socket, &Handle::default()).expect("bad handle?"),
-        )
+    pub fn register_socket_std(&mut self, socket: std::net::UdpSocket) {
+        self.register_socket(net::UdpSocket::from_std(socket).expect("bad handle?"))
     }
 
     /// Register a TcpListener to the Server. This should already be bound to either an IPv6 or an
@@ -87,49 +112,73 @@ impl<T: RequestHandler> ServerFuture<T> {
     ///               possible to create long-lived queries, but these should be from trusted sources
     ///               only, this would require some type of whitelisting.
     pub fn register_listener(
-        &self,
-        listener: tokio_tcp::TcpListener,
+        &mut self,
+        listener: net::TcpListener,
         timeout: Duration,
     ) -> io::Result<()> {
+        debug!("register tcp: {:?}", listener);
+
+        let spawner = Handle::current();
         let handler = self.handler.clone();
-        debug!("registered tcp: {:?}", listener);
 
         // for each incoming request...
-        tokio_executor::spawn(
-            listener
-                .incoming()
-                .for_each(move |tcp_stream| {
-                    let src_addr = tcp_stream.peer_addr().unwrap();
-                    debug!("accepted request from: {}", src_addr);
-                    // take the created stream...
-                    let (buf_stream, stream_handle) = TcpStream::from_stream(tcp_stream, src_addr);
-                    let timeout_stream = TimeoutStream::new(buf_stream, timeout);
-                    //let request_stream = RequestStream::new(timeout_stream, stream_handle);
+        let join = spawner.spawn({
+            let spawner = spawner.clone();
+
+            async move {
+                let mut listener = listener;
+                let mut incoming = listener.incoming();
+
+                while let Some(tcp_stream) = incoming.next().await {
+                    let tcp_stream = match tcp_stream {
+                        Ok(t) => t,
+                        Err(e) => {
+                            debug!("error receiving TCP tcp_stream error: {}", e);
+                            continue;
+                        }
+                    };
+
                     let handler = handler.clone();
 
                     // and spawn to the io_loop
-                    tokio_executor::spawn(
-                        timeout_stream
-                            .map_err(move |e| {
-                                debug!(
-                                    "error in TCP request_stream src: {:?} error: {}",
-                                    src_addr, e
-                                )
-                            })
-                            .for_each(move |message| {
-                                self::handle_raw_request(
-                                    message,
-                                    handler.clone(),
-                                    stream_handle.clone(),
-                                )
-                            }),
-                    );
+                    spawner.spawn(async move {
+                        let src_addr = tcp_stream.peer_addr().unwrap();
+                        debug!("accepted request from: {}", src_addr);
+                        // take the created stream...
+                        let (buf_stream, stream_handle) =
+                            TcpStream::from_stream(AsyncIo02As03(tcp_stream), src_addr);
+                        let mut timeout_stream = TimeoutStream::new(buf_stream, timeout);
+                        //let request_stream = RequestStream::new(timeout_stream, stream_handle);
 
-                    Ok(())
-                })
-                .map_err(|e| panic!("error in inbound tcp_stream: {}", e)),
-        );
+                        while let Some(message) = timeout_stream.next().await {
+                            let message = match message {
+                                Ok(message) => message,
+                                Err(e) => {
+                                    debug!(
+                                        "error in TCP request_stream src: {} error: {}",
+                                        src_addr, e
+                                    );
+                                    // we're going to bail on this connection...
+                                    return;
+                                }
+                            };
 
+                            // we don't spawn here to limit clients from getting too many resources
+                            self::handle_raw_request(
+                                message,
+                                handler.clone(),
+                                stream_handle.clone(),
+                            )
+                            .await;
+                        }
+                    });
+                }
+
+                Err(ProtoError::from("unexpected close of TCP socket"))
+            }
+        });
+
+        self.joins.push(join);
         Ok(())
     }
 
@@ -146,14 +195,11 @@ impl<T: RequestHandler> ServerFuture<T> {
     ///               possible to create long-lived queries, but these should be from trusted sources
     ///               only, this would require some type of whitelisting.
     pub fn register_listener_std(
-        &self,
+        &mut self,
         listener: std::net::TcpListener,
         timeout: Duration,
     ) -> io::Result<()> {
-        self.register_listener(
-            tokio_tcp::TcpListener::from_std(listener, &Handle::default())?,
-            timeout,
-        )
+        self.register_listener(net::TcpListener::from_std(listener)?, timeout)
     }
 
     /// Register a TlsListener to the Server. The TlsListener should already be bound to either an
@@ -171,75 +217,89 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
     pub fn register_tls_listener(
-        &self,
-        listener: tokio_tcp::TcpListener,
+        &mut self,
+        listener: net::TcpListener,
         timeout: Duration,
         certificate_and_key: ((X509, Option<Stack<X509>>), PKey<Private>),
     ) -> io::Result<()> {
-        use futures::future;
         use trust_dns_openssl::{tls_server, TlsStream};
 
         let ((cert, chain), key) = certificate_and_key;
+
+        let spawner = Handle::current();
         let handler = self.handler.clone();
         debug!("registered tcp: {:?}", listener);
 
-        let tls_acceptor = tls_server::new_acceptor(cert, chain, key)?;
+        let tls_acceptor = Box::pin(tls_server::new_acceptor(cert, chain, key)?);
 
         // for each incoming request...
-        tokio_executor::spawn(future::lazy(move || {
-            listener
-                .incoming()
-                .for_each(move |tcp_stream| {
-                    let src_addr = tcp_stream.peer_addr().unwrap();
-                    debug!("accepted request from: {}", src_addr);
+        let join = spawner.spawn({
+            let spawner = spawner.clone();
+
+            async move {
+                let mut listener = listener;
+                let mut incoming = listener.incoming();
+
+                while let Some(tcp_stream) = incoming.next().await {
+                    let tcp_stream = match tcp_stream {
+                        Ok(t) => t,
+                        Err(e) => {
+                            debug!("error receiving TLS tcp_stream error: {}", e);
+                            continue;
+                        }
+                    };
+
                     let handler = handler.clone();
+                    let tls_acceptor = tls_acceptor.clone();
 
-                    // take the created stream...
-                    tls_acceptor
-                        .accept_async(tcp_stream)
-                        .map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::ConnectionRefused,
-                                format!("tls error: {}", e),
+                    // kick out to a different task immediately, let them do the TLS handshake
+                    spawner.spawn(async move {
+                        let src_addr = tcp_stream.peer_addr().unwrap();
+                        debug!("starting TLS request from: {}", src_addr);
+
+                        // perform the TLS
+                        let tls_stream = tokio_openssl::accept(&*tls_acceptor, tcp_stream).await;
+
+                        let tls_stream = match tls_stream {
+                            Ok(tls_stream) => tls_stream,
+                            Err(e) => {
+                                debug!("tls handshake src: {} error: {}", src_addr, e);
+                                return ();
+                            }
+                        };
+                        debug!("accepted TLS request from: {}", src_addr);
+                        let (buf_stream, stream_handle) =
+                            TlsStream::from_stream(AsyncIo02As03(tls_stream), src_addr);
+                        let mut timeout_stream = TimeoutStream::new(buf_stream, timeout);
+                        while let Some(message) = timeout_stream.next().await {
+                            let message = match message {
+                                Ok(message) => message,
+                                Err(e) => {
+                                    debug!(
+                                        "error in TLS request_stream src: {:?} error: {}",
+                                        src_addr, e
+                                    );
+
+                                    // kill this connection
+                                    return ();
+                                }
+                            };
+
+                            self::handle_raw_request(
+                                message,
+                                handler.clone(),
+                                stream_handle.clone(),
                             )
-                        })
-                        .and_then(move |tls_stream| {
-                            let (buf_stream, stream_handle) =
-                                TlsStream::from_stream(tls_stream, src_addr);
-                            let timeout_stream = TimeoutStream::new(buf_stream, timeout);
-                            //let request_stream = RequestStream::new(timeout_stream, stream_handle);
-                            let handler = handler.clone();
+                            .await;
+                        }
+                    });
+                }
 
-                            // and spawn to the io_loop
-                            tokio_executor::spawn(
-                                timeout_stream
-                                    .map_err(move |e| {
-                                        debug!(
-                                            "error in TLS request_stream src: {:?} error: {}",
-                                            src_addr, e
-                                        )
-                                    })
-                                    .for_each(move |message| {
-                                        self::handle_raw_request(
-                                            message,
-                                            handler.clone(),
-                                            stream_handle.clone(),
-                                        )
-                                    })
-                                    .map_err(move |_| {
-                                        debug!("error in TLS request_stream src: {:?}", src_addr)
-                                    }),
-                            );
+                Err(ProtoError::from("unexpected close of TLS socket"))
+            }
+        });
 
-                            Ok(())
-                        })
-                    // FIXME: need to map this error to Ok, otherwise this is a DOS potential
-                    // .map_err(move |e| {
-                    //     debug!("error TLS handshake: {:?} error: {:?}", src_addr, e)
-                    // })
-                })
-                .map_err(|e| panic!("error in inbound tls_stream: {}", e))
-        }));
+        self.joins.push(join);
 
         Ok(())
     }
@@ -259,13 +319,13 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(all(feature = "dns-over-openssl", not(feature = "dns-over-rustls")))]
     pub fn register_tls_listener_std(
-        &self,
+        &mut self,
         listener: std::net::TcpListener,
         timeout: Duration,
         certificate_and_key: ((X509, Option<Stack<X509>>), PKey<Private>),
     ) -> io::Result<()> {
         self.register_tls_listener(
-            tokio_tcp::TcpListener::from_std(listener, &Handle::default())?,
+            net::TcpListener::from_std(listener)?,
             timeout,
             certificate_and_key,
         )
@@ -286,15 +346,15 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(feature = "dns-over-rustls")]
     pub fn register_tls_listener(
-        &self,
-        listener: tokio_tcp::TcpListener,
+        &mut self,
+        listener: net::TcpListener,
         timeout: Duration,
         certificate_and_key: (Vec<Certificate>, PrivateKey),
     ) -> io::Result<()> {
-        use futures::future;
         use tokio_rustls::TlsAcceptor;
         use trust_dns_rustls::{tls_from_stream, tls_server};
 
+        let spawner = Handle::current();
         let handler = self.handler.clone();
 
         debug!("registered tcp: {:?}", listener);
@@ -309,60 +369,72 @@ impl<T: RequestHandler> ServerFuture<T> {
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_acceptor));
 
         // for each incoming request...
-        tokio_executor::spawn(future::lazy(move || {
-            listener
-                .incoming()
-                .for_each(move |tcp_stream| {
-                    let src_addr = tcp_stream.peer_addr().unwrap();
-                    debug!("accepted request from: {}", src_addr);
+        let join = spawner.spawn({
+            let spawner = spawner.clone();
+
+            async move {
+                let mut listener = listener;
+                let mut incoming = listener.incoming();
+
+                while let Some(tcp_stream) = incoming.next().await {
+                    let tcp_stream = match tcp_stream {
+                        Ok(t) => t,
+                        Err(e) => {
+                            debug!("error receiving TLS tcp_stream error: {}", e);
+                            continue;
+                        }
+                    };
+
                     let handler = handler.clone();
+                    let tls_acceptor = tls_acceptor.clone();
 
-                    // TODO: need to consider timeout of total connect...
-                    // take the created stream...
-                    tls_acceptor
-                        .accept(tcp_stream)
-                        .map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::ConnectionRefused,
-                                format!("tls error: {}", e),
+                    // kick out to a different task immediately, let them do the TLS handshake
+                    spawner.spawn(async move {
+                        let src_addr = tcp_stream.peer_addr().unwrap();
+                        debug!("starting TLS request from: {}", src_addr);
+
+                        // perform the TLS
+                        let tls_stream = tls_acceptor.accept(tcp_stream).await;
+
+                        let tls_stream = match tls_stream {
+                            Ok(tls_stream) => AsyncIo02As03(tls_stream),
+                            Err(e) => {
+                                debug!("tls handshake src: {} error: {}", src_addr, e);
+                                return;
+                            }
+                        };
+                        debug!("accepted TLS request from: {}", src_addr);
+                        let (buf_stream, stream_handle) = tls_from_stream(tls_stream, src_addr);
+                        let mut timeout_stream = TimeoutStream::new(buf_stream, timeout);
+                        while let Some(message) = timeout_stream.next().await {
+                            let message = match message {
+                                Ok(message) => message,
+                                Err(e) => {
+                                    debug!(
+                                        "error in TLS request_stream src: {:?} error: {}",
+                                        src_addr, e
+                                    );
+
+                                    // kill this connection
+                                    return;
+                                }
+                            };
+
+                            self::handle_raw_request(
+                                message,
+                                handler.clone(),
+                                stream_handle.clone(),
                             )
-                        })
-                        .and_then(move |tls_stream| {
-                            let (buf_stream, stream_handle) = tls_from_stream(tls_stream, src_addr);
-                            let timeout_stream = TimeoutStream::new(buf_stream, timeout);
-                            //let request_stream = RequestStream::new(timeout_stream, stream_handle);
-                            let handler = handler.clone();
+                            .await;
+                        }
+                    });
+                }
 
-                            // and spawn to the io_loop
-                            tokio_executor::spawn(
-                                timeout_stream
-                                    .map_err(move |e| {
-                                        debug!(
-                                            "error in TLS request_stream src: {:?} error: {}",
-                                            src_addr, e
-                                        )
-                                    })
-                                    .for_each(move |message| {
-                                        self::handle_raw_request(
-                                            message,
-                                            handler.clone(),
-                                            stream_handle.clone(),
-                                        )
-                                    })
-                                    .map_err(move |_| {
-                                        debug!("error in TLS request_stream src: {:?}", src_addr)
-                                    }),
-                            );
+                Err(ProtoError::from("unexpected close of TLS socket"))
+            }
+        });
 
-                            Ok(())
-                        })
-                    // FIXME: need to map this error to Ok, otherwise this is a DOS potential
-                    // .map_err(move |e| {
-                    //     debug!("error HTTPS handshake: {:?} error: {:?}", src_addr, e)
-                    // })
-                })
-                .map_err(|e| panic!("error in inbound https_stream: {}", e))
-        }));
+        self.joins.push(join);
 
         Ok(())
     }
@@ -386,7 +458,7 @@ impl<T: RequestHandler> ServerFuture<T> {
     ))]
     pub fn register_https_listener(
         &self,
-        listener: tokio_tcp::TcpListener,
+        listener: tcp::TcpListener,
         timeout: Duration,
         pkcs12: ParsedPkcs12,
     ) -> io::Result<()> {
@@ -408,19 +480,19 @@ impl<T: RequestHandler> ServerFuture<T> {
     /// * `pkcs12` - certificate used to announce to clients
     #[cfg(feature = "dns-over-https-rustls")]
     pub fn register_https_listener(
-        &self,
-        listener: tokio_tcp::TcpListener,
+        &mut self,
+        listener: net::TcpListener,
         // TODO: need to set a timeout between requests.
         _timeout: Duration,
         certificate_and_key: (Vec<Certificate>, PrivateKey),
         dns_hostname: String,
     ) -> io::Result<()> {
-        use futures::future;
         use tokio_rustls::TlsAcceptor;
 
-        use server::https_handler::h2_handler;
+        use crate::server::https_handler::h2_handler;
         use trust_dns_rustls::tls_server;
 
+        let spawner = Handle::current();
         let dns_hostname = Arc::new(dns_hostname);
         let handler = self.handler.clone();
         debug!("registered tcp: {:?}", listener);
@@ -435,36 +507,63 @@ impl<T: RequestHandler> ServerFuture<T> {
         let tls_acceptor = TlsAcceptor::from(Arc::new(tls_acceptor));
 
         // for each incoming request...
-        let dns_hostname = dns_hostname.clone();
-        tokio_executor::spawn(future::lazy(move || {
-            let dns_hostname = dns_hostname.clone();
+        let dns_hostname = dns_hostname;
+        let join = spawner.spawn({
+            let spawner = spawner.clone();
 
-            listener
-                .incoming()
-                .map_err(|e| warn!("error in inbound https_stream: {}", e))
-                .for_each(move |tcp_stream| {
-                    let src_addr = tcp_stream.peer_addr().unwrap();
-                    debug!("accepted request from: {}", src_addr);
+            async move {
+                let mut listener = listener;
+                let mut incoming = listener.incoming();
+
+                let dns_hostname = dns_hostname;
+
+                while let Some(tcp_stream) = incoming.next().await {
+                    let tcp_stream = match tcp_stream {
+                        Ok(t) => t,
+                        Err(e) => {
+                            debug!("error receiving HTTPS tcp_stream error: {}", e);
+                            continue;
+                        }
+                    };
+
                     let handler = handler.clone();
+                    let tls_acceptor = tls_acceptor.clone();
                     let dns_hostname = dns_hostname.clone();
 
-                    // TODO: need to consider timeout of total connect...
-                    // take the created stream...
-                    tls_acceptor
-                        .accept(tcp_stream)
-                        .map_err(|e| warn!("tls error: {}", e))
-                        .and_then(move |tls_stream| {
-                            h2_handler(handler, tls_stream, src_addr, dns_hostname)
-                        })
-                    // FIXME: need to map this error to Ok, otherwise this is a DOS potential
-                    // .map_err(move |e| {
-                    //     debug!("error HTTPS handshake: {:?} error: {:?}", src_addr, e)
-                    // })
-                })
-                .map_err(|_| panic!("error in inbound https_stream"))
-        }));
+                    spawner.spawn(async move {
+                        let src_addr = tcp_stream.peer_addr().unwrap();
+                        debug!("starting HTTPS request from: {}", src_addr);
 
+                        // TODO: need to consider timeout of total connect...
+                        // take the created stream...
+                        let tls_stream = tls_acceptor.accept(tcp_stream).await;
+
+                        let tls_stream = match tls_stream {
+                            Ok(tls_stream) => tls_stream,
+                            Err(e) => {
+                                debug!("https handshake src: {} error: {}", src_addr, e);
+                                return;
+                            }
+                        };
+                        debug!("accepted HTTPS request from: {}", src_addr);
+
+                        h2_handler(handler, tls_stream, src_addr, dns_hostname).await;
+                    });
+                }
+
+                Err(ProtoError::from("unexpected close of HTTPS socket"))
+            }
+        });
+
+        self.joins.push(join);
         Ok(())
+    }
+
+    /// This will run until all background tasks of the trust_dns_server end.
+    pub async fn block_until_done(self) -> Result<(), ProtoError> {
+        let (result, _, _) = future::select_all(self.joins).await;
+
+        result.map_err(|e| ProtoError::from(format!("Internal error in spawn: {}", e)))?
     }
 }
 
@@ -523,21 +622,20 @@ pub(crate) fn handle_request<R: ResponseHandler, T: RequestHandler>(
 }
 
 #[must_use = "futures do nothing unless polled"]
-pub(crate) enum HandleRawRequest<F: Future<Item = (), Error = ()>> {
+pub(crate) enum HandleRawRequest<F: Future<Output = ()>> {
     HandleRequest(F),
     Result(io::Error),
 }
 
-impl<F: Future<Item = (), Error = ()>> Future for HandleRawRequest<F> {
-    type Item = ();
-    type Error = ();
+impl<F: Future<Output = ()> + Unpin> Future for HandleRawRequest<F> {
+    type Output = ();
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self {
-            HandleRawRequest::HandleRequest(f) => f.poll(),
-            HandleRawRequest::Result(res) => {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        match *self {
+            HandleRawRequest::HandleRequest(ref mut f) => f.poll_unpin(cx),
+            HandleRawRequest::Result(ref res) => {
                 warn!("failed to handle message: {}", res);
-                Ok(Async::Ready(()))
+                Poll::Ready(())
             }
         }
     }

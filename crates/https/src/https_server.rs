@@ -11,34 +11,38 @@ use std::borrow::Borrow;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use futures::{Async, Future, Poll, Stream};
+use bytes::{Bytes, BytesMut};
+use futures::{Stream, StreamExt};
 use h2;
 use http::{Method, Request};
+use log::debug;
 use typed_headers::{ContentLength, HeaderMapExt};
 
-use HttpsError;
+use crate::HttpsError;
 
 /// Given an HTTP request, return a future that will result in the next sequence of bytes.
 ///
 /// To allow downstream clients to do something interesting with the lifetime of the bytes, this doesn't
 ///   perform a conversion to a Message, only collects all the bytes.
-pub fn message_from<R>(this_server_name: Arc<String>, request: Request<R>) -> HttpsToMessage<R>
+pub async fn message_from<R>(
+    this_server_name: Arc<String>,
+    request: Request<R>,
+) -> Result<BytesMut, HttpsError>
 where
-    R: Stream<Item = Bytes, Error = h2::Error> + 'static + Send + Debug,
+    R: Stream<Item = Result<Bytes, h2::Error>> + 'static + Send + Debug + Unpin,
 {
     debug!("Received request: {:#?}", request);
 
     let this_server_name: &String = this_server_name.borrow();
-    match ::request::verify(this_server_name, &request) {
+    match crate::request::verify(this_server_name, &request) {
         Ok(_) => (),
-        Err(err) => return HttpsToMessageInner::HttpsError(Some(err)).into(),
+        Err(err) => return Err(err),
     }
 
     // attempt to get the content length
     let content_length: Option<ContentLength> = match request.headers().typed_get() {
         Ok(l) => l,
-        Err(err) => return HttpsToMessageInner::HttpsError(Some(err.into())).into(),
+        Err(err) => return Err(err.into()),
     };
 
     let content_length: Option<usize> = content_length.map(|c| {
@@ -48,122 +52,57 @@ where
     });
 
     match *request.method() {
-        Method::GET => HttpsToMessageInner::HttpsError(Some(
-            format!("GET unimplemented: {}", request.method()).into(),
-        ))
-        .into(),
-        Method::POST => message_from_post(request, content_length).into(),
-        _ => HttpsToMessageInner::HttpsError(Some(
-            format!("bad method: {}", request.method()).into(),
-        ))
-        .into(),
+        Method::GET => Err(format!("GET unimplemented: {}", request.method()).into()),
+        Method::POST => message_from_post(request.into_body(), content_length).await,
+        _ => Err(format!("bad method: {}", request.method()).into()),
     }
 }
 
-/// A Future result of the bytes of a DNS message
-#[must_use = "futures do nothing unless polled"]
-pub struct HttpsToMessage<R>(HttpsToMessageInner<R>);
-
-impl<R> From<HttpsToMessageInner<R>> for HttpsToMessage<R> {
-    fn from(inner: HttpsToMessageInner<R>) -> Self {
-        HttpsToMessage(inner)
-    }
-}
-
-impl<R> From<MessageFromPost<R>> for HttpsToMessage<R> {
-    fn from(inner: MessageFromPost<R>) -> Self {
-        HttpsToMessage(HttpsToMessageInner::FromPost(inner))
-    }
-}
-
-impl<R> Future for HttpsToMessage<R>
-where
-    R: Stream<Item = Bytes, Error = h2::Error> + 'static + Send,
-{
-    type Item = Bytes;
-    type Error = HttpsError;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.0.poll()
-    }
-}
-
-#[must_use = "futures do nothing unless polled"]
-enum HttpsToMessageInner<R> {
-    FromPost(MessageFromPost<R>),
-    HttpsError(Option<HttpsError>),
-}
-
-impl<R> Future for HttpsToMessageInner<R>
-where
-    R: Stream<Item = Bytes, Error = h2::Error> + 'static + Send,
-{
-    type Item = Bytes;
-    type Error = HttpsError;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self {
-            HttpsToMessageInner::FromPost(from_post) => from_post.poll(),
-            HttpsToMessageInner::HttpsError(error) => {
-                Err(error.take().expect("cannot poll after complete"))
-            }
-        }
-    }
-}
-
-fn message_from_post<R>(request: Request<R>, length: Option<usize>) -> MessageFromPost<R> {
-    let body = request.into_body();
-    MessageFromPost {
-        stream: body,
-        length,
-    }
-}
-
-#[must_use = "futures do nothing unless polled"]
-struct MessageFromPost<R> {
-    stream: R,
+/// Deserialize the message from a POST message
+pub(crate) async fn message_from_post<R>(
+    mut request_stream: R,
     length: Option<usize>,
-}
-
-impl<R> Future for MessageFromPost<R>
+) -> Result<BytesMut, HttpsError>
 where
-    R: Stream<Item = Bytes, Error = h2::Error> + 'static + Send,
+    R: Stream<Item = Result<Bytes, h2::Error>> + 'static + Send + Debug + Unpin,
 {
-    type Item = Bytes;
-    type Error = HttpsError;
+    let mut bytes = BytesMut::with_capacity(length.unwrap_or(0).min(512).max(4096));
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        loop {
-            let bytes = match self.stream.poll() {
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
-                Ok(Async::Ready(Some(bytes))) => bytes,
-                Ok(Async::Ready(None)) => return Err("not all bytes received".into()),
-                Err(e) => return Err(e.into()),
-            };
+    loop {
+        match request_stream.next().await {
+            Some(Ok(mut frame)) => bytes.extend_from_slice(&frame.split_off(0)),
+            Some(Err(err)) => return Err(err.into()),
+            None => {
+                return if let Some(length) = length {
+                    // wait until we have all the bytes
+                    if bytes.len() == length {
+                        Ok(bytes)
+                    } else {
+                        Err("not all bytes received".into())
+                    }
+                } else {
+                    Ok(bytes)
+                };
+            }
+        };
 
-            let bytes = if let Some(length) = self.length {
-                // wait until we have all the bytes
-                if bytes.len() < length {
-                    continue;
-                }
-
-                // this will trim the bytes back to whatever we didn't consume
-                bytes.slice_to(length)
-            } else {
-                warn!("no content-length, assuming we have all the bytes");
-                bytes.slice_from(0)
-            };
-
-            //let message = Message::from_vec(&bytes)?;
-            return Ok(Async::Ready(bytes));
+        if let Some(length) = length {
+            // wait until we have all the bytes
+            if bytes.len() == length {
+                return Ok(bytes);
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use request;
+    use futures::executor::block_on;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use trust_dns_proto::op::Message;
+
+    use crate::request;
 
     use super::*;
 
@@ -171,14 +110,13 @@ mod tests {
     struct TestBytesStream(Vec<Result<Bytes, h2::Error>>);
 
     impl Stream for TestBytesStream {
-        type Item = Bytes;
-        type Error = h2::Error;
+        type Item = Result<Bytes, h2::Error>;
 
-        fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
             match self.0.pop() {
-                Some(Ok(bytes)) => Ok(Async::Ready(Some(bytes))),
-                Some(Err(err)) => Err(err),
-                None => Ok(Async::Ready(None)),
+                Some(Ok(bytes)) => Poll::Ready(Some(Ok(bytes))),
+                Some(Err(err)) => Poll::Ready(Some(Err(err))),
+                None => Poll::Ready(None),
             }
         }
     }
@@ -192,9 +130,9 @@ mod tests {
         let request = request::new("ns.example.com", len).unwrap();
         let request = request.map(|()| stream);
 
-        let mut from_post = message_from(Arc::new("ns.example.com".to_string()), request);
-        let bytes = match from_post.poll() {
-            Ok(Async::Ready(bytes)) => bytes,
+        let from_post = message_from(Arc::new("ns.example.com".to_string()), request);
+        let bytes = match block_on(from_post) {
+            Ok(bytes) => bytes,
             e => panic!("{:#?}", e),
         };
 

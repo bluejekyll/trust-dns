@@ -1,12 +1,14 @@
+#![cfg(feature = "sqlite")]
+
 extern crate futures;
-extern crate trust_dns;
+extern crate trust_dns_client;
 extern crate trust_dns_server;
 
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use trust_dns::rr::Name;
+use trust_dns_client::rr::Name;
 use trust_dns_server::authority::ZoneType;
 use trust_dns_server::store::sqlite::{SqliteAuthority, SqliteConfig};
 
@@ -15,7 +17,7 @@ mod authority_battery;
 
 fn sqlite(master_file_path: &str, module: &str, test_name: &str) -> SqliteAuthority {
     let journal_path = PathBuf::from("target/tests")
-        .join(module)
+        .join(module.replace("::", "_"))
         .join(test_name)
         .join("authority_battery.jrnl");
     fs::create_dir_all(journal_path.parent().unwrap()).ok();
@@ -36,13 +38,14 @@ fn sqlite(master_file_path: &str, module: &str, test_name: &str) -> SqliteAuthor
         true,
         None,
         &config,
-    ).expect("failed to load file")
+    )
+    .expect("failed to load file")
 }
 
 #[allow(unused)]
 fn sqlite_update(master_file_path: &str, module: &str, test_name: &str) -> SqliteAuthority {
     let journal_path = PathBuf::from("target/tests")
-        .join(module)
+        .join(module.replace("::", "_"))
         .join(test_name)
         .join("authority_battery.jrnl");
     fs::create_dir_all(journal_path.parent().unwrap()).ok();
@@ -63,7 +66,8 @@ fn sqlite_update(master_file_path: &str, module: &str, test_name: &str) -> Sqlit
         true,
         None,
         &config,
-    ).expect("failed to load file")
+    )
+    .expect("failed to load file")
 }
 
 basic_battery!(sqlite);

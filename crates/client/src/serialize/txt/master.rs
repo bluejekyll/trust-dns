@@ -16,10 +16,10 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use error::*;
-use rr::{DNSClass, LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
-use serialize::txt::master_lex::{Lexer, Token};
-use serialize::txt::parse_rdata::RDataParser;
+use crate::error::*;
+use crate::rr::{DNSClass, LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
+use crate::serialize::txt::master_lex::{Lexer, Token};
+use crate::serialize::txt::parse_rdata::RDataParser;
 
 /// ```text
 /// 5. MASTER FILES
@@ -158,7 +158,9 @@ impl Parser {
 
                     match t {
                         // if Dollar, then $INCLUDE or $ORIGIN
-                        Token::Include => unimplemented!(),
+                        Token::Include => {
+                            return Err(ParseError::from(ParseErrorKind::Message("The parser does not support $INCLUDE. Consider inlining file before parsing")))
+                        },
                         Token::Origin => State::Origin,
                         Token::Ttl => State::Ttl,
 
@@ -197,7 +199,9 @@ impl Parser {
                         _ => return Err(ParseErrorKind::UnexpectedToken(t).into()),
                     }
                 }
-                State::Include => unimplemented!(),
+                State::Include => return Err(ParseError::from(ParseErrorKind::Message(
+                    "The parser does not support $INCLUDE. Consider inlining file before parsing",
+                ))),
                 State::TtlClassType => {
                     match t {
                         // if number, TTL
@@ -378,7 +382,7 @@ impl Parser {
     ///
     /// # Example
     /// ```
-    /// use trust_dns::serialize::txt::Parser;
+    /// use trust_dns_client::serialize::txt::Parser;
     ///
     /// assert_eq!(Parser::parse_time("0").unwrap(),  0);
     /// assert_eq!(Parser::parse_time("s").unwrap(),  0);

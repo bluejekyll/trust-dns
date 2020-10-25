@@ -7,18 +7,20 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 
-use futures::sync::mpsc::unbounded;
-use futures::{future, Future, IntoFuture};
+use futures::channel::mpsc::unbounded;
+use futures::{future, Future, TryFutureExt};
 use openssl::pkcs12::ParsedPkcs12;
 use openssl::pkey::{PKeyRef, Private};
-use openssl::ssl::{SslConnector, SslContextBuilder, SslMethod, SslOptions};
+use openssl::ssl::{ConnectConfiguration, SslConnector, SslContextBuilder, SslMethod, SslOptions};
 use openssl::stack::Stack;
 use openssl::x509::store::X509StoreBuilder;
 use openssl::x509::{X509Ref, X509};
-use tokio_openssl::{SslConnectorExt, SslStream as TokioTlsStream};
-use tokio_tcp::TcpStream as TokioTcpStream;
+use tokio::net::TcpStream as TokioTcpStream;
+use tokio_openssl::{self, SslStream as TokioTlsStream};
 
+use trust_dns_proto::iocompat::AsyncIo02As03;
 use trust_dns_proto::tcp::TcpStream;
 use trust_dns_proto::xfer::BufStreamHandle;
 
@@ -55,7 +57,7 @@ impl TlsIdentityExt for SslContextBuilder {
 }
 
 /// A TlsStream counterpart to the TcpStream which embeds a secure TlsStream
-pub type TlsStream = TcpStream<TokioTlsStream<TokioTcpStream>>;
+pub type TlsStream = TcpStream<AsyncIo02As03<TokioTlsStream<TokioTcpStream>>>;
 
 fn new(certs: Vec<X509>, pkcs12: Option<ParsedPkcs12>) -> io::Result<SslConnector> {
     let mut tls = SslConnector::builder(SslMethod::tls()).map_err(|e| {
@@ -114,7 +116,7 @@ fn new(certs: Vec<X509>, pkcs12: Option<ParsedPkcs12>) -> io::Result<SslConnecto
 ///
 /// This is intended for use with a TlsListener and Incoming connections
 pub fn tls_stream_from_existing_tls_stream(
-    stream: TokioTlsStream<TokioTcpStream>,
+    stream: AsyncIo02As03<TokioTlsStream<TokioTcpStream>>,
     peer_addr: SocketAddr,
 ) -> (TlsStream, BufStreamHandle) {
     let (message_sender, outbound_messages) = unbounded();
@@ -123,6 +125,27 @@ pub fn tls_stream_from_existing_tls_stream(
     let stream = TcpStream::from_stream_with_receiver(stream, peer_addr, outbound_messages);
 
     (stream, message_sender)
+}
+
+async fn connect_tls(
+    tls_config: ConnectConfiguration,
+    dns_name: String,
+    name_server: SocketAddr,
+) -> Result<TokioTlsStream<TokioTcpStream>, io::Error> {
+    let tcp = TokioTcpStream::connect(&name_server).await.map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("tls error: {}", e),
+        )
+    })?;
+    let result = tokio_openssl::connect(tls_config, &dns_name, tcp).await;
+
+    result.map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("tls error: {}", e),
+        )
+    })
 }
 
 /// A builder for the TlsStream
@@ -179,22 +202,23 @@ impl TlsStreamBuilder {
     ///
     /// * `name_server` - IP and Port for the remote DNS resolver
     /// * `dns_name` - The DNS name, Subject Public Key Info (SPKI) name, as associated to a certificate
+    #[allow(clippy::type_complexity)]
     pub fn build(
         self,
         name_server: SocketAddr,
         dns_name: String,
     ) -> (
-        Box<dyn Future<Item = TlsStream, Error = io::Error> + Send>,
+        Pin<Box<dyn Future<Output = Result<TlsStream, io::Error>> + Send>>,
         BufStreamHandle,
     ) {
         let (message_sender, outbound_messages) = unbounded();
         let message_sender = BufStreamHandle::new(message_sender);
 
-        let tls_connector = match new(self.ca_chain, self.identity) {
+        let tls_config = match new(self.ca_chain, self.identity) {
             Ok(c) => c,
             Err(e) => {
                 return (
-                    Box::new(future::err(e).into_future().map_err(|e| {
+                    Box::pin(future::err(e).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::ConnectionRefused,
                             format!("tls error: {}", e),
@@ -205,26 +229,29 @@ impl TlsStreamBuilder {
             }
         };
 
-        let tcp = TokioTcpStream::connect(&name_server);
+        let tls_config = match tls_config.configure() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    Box::pin(future::err(e).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::ConnectionRefused,
+                            format!("tls config error: {}", e),
+                        )
+                    })),
+                    message_sender,
+                )
+            }
+        };
 
         // This set of futures collapses the next tcp socket into a stream which can be used for
         //  sending and receiving tcp packets.
-        let stream = Box::new(
-            tcp.and_then(move |tcp_stream| {
-                tls_connector
-                    .connect_async(&dns_name, tcp_stream)
-                    .map(move |s| {
-                        TcpStream::from_stream_with_receiver(s, name_server, outbound_messages)
-                    }).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::ConnectionRefused,
-                            format!("tls error: {}", e),
-                        )
-                    })
-            }).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    format!("tls error: {}", e),
+        let stream = Box::pin(
+            connect_tls(tls_config, dns_name, name_server).map_ok(move |s| {
+                TcpStream::from_stream_with_receiver(
+                    AsyncIo02As03(s),
+                    name_server,
+                    outbound_messages,
                 )
             }),
         );

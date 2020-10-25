@@ -2,22 +2,21 @@
 
 use std::str::FromStr;
 
+use futures::executor::block_on;
 use futures::Future;
 
-use trust_dns::op::Query;
-use trust_dns::proto::rr::dnssec::rdata::{DNSSECRecordType, DNSKEY};
-use trust_dns::proto::xfer;
-use trust_dns::rr::dnssec::{Algorithm, SupportedAlgorithms, Verifier};
-use trust_dns::rr::{DNSClass, Name, Record, RecordType};
+use trust_dns_client::op::Query;
+use trust_dns_client::proto::rr::dnssec::rdata::{DNSSECRecordType, DNSKEY};
+use trust_dns_client::proto::xfer;
+use trust_dns_client::rr::dnssec::{Algorithm, SupportedAlgorithms, Verifier};
+use trust_dns_client::rr::{DNSClass, Name, Record, RecordType};
 use trust_dns_server::authority::{AuthLookup, Authority};
 
 pub fn test_a_lookup<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DNSKEY]) {
     let query = Query::query(Name::from_str("www.example.com.").unwrap(), RecordType::A);
 
-    let lookup = authority
-        .search(&query.into(), true, SupportedAlgorithms::new())
-        .wait()
-        .unwrap();
+    let lookup =
+        block_on(authority.search(&query.into(), true, SupportedAlgorithms::new())).unwrap();
 
     let (a_records, other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -34,10 +33,7 @@ pub fn test_a_lookup<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DN
 
 #[allow(clippy::unreadable_literal)]
 pub fn test_soa<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DNSKEY]) {
-    let lookup = authority
-        .soa_secure(true, SupportedAlgorithms::new())
-        .wait()
-        .unwrap();
+    let lookup = block_on(authority.soa_secure(true, SupportedAlgorithms::new())).unwrap();
 
     let (soa_records, other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -65,10 +61,7 @@ pub fn test_soa<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DNSKEY]
 }
 
 pub fn test_ns<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DNSKEY]) {
-    let lookup = authority
-        .ns(true, SupportedAlgorithms::new())
-        .wait()
-        .unwrap();
+    let lookup = block_on(authority.ns(true, SupportedAlgorithms::new())).unwrap();
 
     let (ns_records, other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -94,10 +87,8 @@ pub fn test_aname_lookup<A: Authority<Lookup = AuthLookup>>(authority: A, keys: 
         RecordType::A,
     );
 
-    let lookup = authority
-        .search(&query.into(), true, SupportedAlgorithms::new())
-        .wait()
-        .unwrap();
+    let lookup =
+        block_on(authority.search(&query.into(), true, SupportedAlgorithms::new())).unwrap();
 
     let (a_records, other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -118,9 +109,7 @@ pub fn test_wildcard<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DN
         Name::from_str("www.wildcard.example.com.").unwrap(),
         RecordType::CNAME,
     );
-    let lookup = authority
-        .search(&query.into(), true, SupportedAlgorithms::new())
-        .wait()
+    let lookup = block_on(authority.search(&query.into(), true, SupportedAlgorithms::new()))
         .expect("lookup of www.wildcard.example.com. failed");
 
     let (cname_records, other_records): (Vec<_>, Vec<_>) = lookup
@@ -143,10 +132,12 @@ pub fn test_wildcard<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DN
 pub fn test_nsec_nodata<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DNSKEY]) {
     // this should have a single nsec record that covers the type
     let name = Name::from_str("www.example.com.").unwrap();
-    let lookup = authority
-        .get_nsec_records(&name.clone().into(), true, SupportedAlgorithms::all())
-        .wait()
-        .unwrap();
+    let lookup = block_on(authority.get_nsec_records(
+        &name.clone().into(),
+        true,
+        SupportedAlgorithms::all(),
+    ))
+    .unwrap();
 
     let (nsec_records, _other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -162,7 +153,7 @@ pub fn test_nsec_nodata<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &
     let nsecs: Vec<&Record> = nsec_records.iter().collect();
 
     let query = Query::query(name, RecordType::TXT);
-    assert!(xfer::secure_dns_handle::verify_nsec(
+    assert!(xfer::dnssec_dns_handle::verify_nsec(
         &query,
         &Name::from_str("example.com.").unwrap(),
         &nsecs
@@ -172,10 +163,12 @@ pub fn test_nsec_nodata<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &
 pub fn test_nsec_nxdomain_start<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DNSKEY]) {
     // tests between the SOA and first record in the zone, where bbb is the first zone record
     let name = Name::from_str("aaa.example.com.").unwrap();
-    let lookup = authority
-        .get_nsec_records(&name.clone().into(), true, SupportedAlgorithms::all())
-        .wait()
-        .unwrap();
+    let lookup = block_on(authority.get_nsec_records(
+        &name.clone().into(),
+        true,
+        SupportedAlgorithms::all(),
+    ))
+    .unwrap();
 
     let (nsec_records, _other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -193,7 +186,7 @@ pub fn test_nsec_nxdomain_start<A: Authority<Lookup = AuthLookup>>(authority: A,
     let nsecs: Vec<&Record> = nsec_records.iter().collect();
 
     let query = Query::query(name, RecordType::A);
-    assert!(xfer::secure_dns_handle::verify_nsec(
+    assert!(xfer::dnssec_dns_handle::verify_nsec(
         &query,
         &Name::from_str("example.com.").unwrap(),
         &nsecs
@@ -203,10 +196,12 @@ pub fn test_nsec_nxdomain_start<A: Authority<Lookup = AuthLookup>>(authority: A,
 pub fn test_nsec_nxdomain_middle<A: Authority<Lookup = AuthLookup>>(authority: A, keys: &[DNSKEY]) {
     // follows the first record, nsec should cover between ccc and www, where bbb is the first zone record
     let name = Name::from_str("ccc.example.com.").unwrap();
-    let lookup = authority
-        .get_nsec_records(&name.clone().into(), true, SupportedAlgorithms::all())
-        .wait()
-        .unwrap();
+    let lookup = block_on(authority.get_nsec_records(
+        &name.clone().into(),
+        true,
+        SupportedAlgorithms::all(),
+    ))
+    .unwrap();
 
     let (nsec_records, _other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -223,7 +218,7 @@ pub fn test_nsec_nxdomain_middle<A: Authority<Lookup = AuthLookup>>(authority: A
     let nsecs: Vec<&Record> = nsec_records.iter().collect();
 
     let query = Query::query(name, RecordType::A);
-    assert!(xfer::secure_dns_handle::verify_nsec(
+    assert!(xfer::dnssec_dns_handle::verify_nsec(
         &query,
         &Name::from_str("example.com.").unwrap(),
         &nsecs
@@ -236,10 +231,12 @@ pub fn test_nsec_nxdomain_wraps_end<A: Authority<Lookup = AuthLookup>>(
 ) {
     // wraps back to the beginning of the zone, where www is the last zone record
     let name = Name::from_str("zzz.example.com.").unwrap();
-    let lookup = authority
-        .get_nsec_records(&name.clone().into(), true, SupportedAlgorithms::all())
-        .wait()
-        .unwrap();
+    let lookup = block_on(authority.get_nsec_records(
+        &name.clone().into(),
+        true,
+        SupportedAlgorithms::all(),
+    ))
+    .unwrap();
 
     let (nsec_records, _other_records): (Vec<_>, Vec<_>) = lookup
         .into_iter()
@@ -256,7 +253,7 @@ pub fn test_nsec_nxdomain_wraps_end<A: Authority<Lookup = AuthLookup>>(
     let nsecs: Vec<&Record> = nsec_records.iter().collect();
 
     let query = Query::query(name, RecordType::A);
-    assert!(xfer::secure_dns_handle::verify_nsec(
+    assert!(xfer::dnssec_dns_handle::verify_nsec(
         &query,
         &Name::from_str("example.com.").unwrap(),
         &nsecs
@@ -273,14 +270,12 @@ pub fn test_rfc_6975_supported_algorithms<A: Authority<Lookup = AuthLookup>>(
 
         let query = Query::query(Name::from_str("www.example.com.").unwrap(), RecordType::A);
 
-        let lookup = authority
-            .search(
-                &query.into(),
-                true,
-                SupportedAlgorithms::from(key.algorithm()),
-            )
-            .wait()
-            .unwrap();
+        let lookup = block_on(authority.search(
+            &query.into(),
+            true,
+            SupportedAlgorithms::from(key.algorithm()),
+        ))
+        .unwrap();
 
         let (a_records, other_records): (Vec<_>, Vec<_>) = lookup
             .into_iter()
@@ -336,10 +331,10 @@ pub fn add_signers<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<
     // rsa
     {
         let key_config = KeyConfig {
-            key_path: "tests/named_test_configs/dnssec/rsa_2048.pem".to_string(),
+            key_path: "../../tests/test-data/named_test_configs/dnssec/rsa_2048.pem".to_string(),
             password: Some("123456".to_string()),
             algorithm: Algorithm::RSASHA512.to_string(),
-            signer_name: Some(signer_name.clone().to_string()),
+            signer_name: Some(signer_name.to_string()),
             is_zone_signing_key: Some(true),
             is_zone_update_auth: Some(false),
         };
@@ -358,7 +353,7 @@ pub fn add_signers<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<
     // // ecdsa_p256
     // {
     //     let key_config = KeyConfig {
-    //         key_path: "tests/named_test_configs/dnssec/ecdsa_p256.pem".to_string(),
+    //         key_path: "../../tests/test-data/named_test_configs/dnssec/ecdsa_p256.pem".to_string(),
     //         password: None,
     //         algorithm: Algorithm::ECDSAP256SHA256.to_string(),
     //         signer_name: Some(signer_name.clone().to_string()),
@@ -375,7 +370,7 @@ pub fn add_signers<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<
     // // ecdsa_p384
     // {
     //     let key_config = KeyConfig {
-    //         key_path: "tests/named_test_configs/dnssec/ecdsa_p384.pem".to_string(),
+    //         key_path: "../../tests/test-data/named_test_configs/dnssec/ecdsa_p384.pem".to_string(),
     //         password: None,
     //         algorithm: Algorithm::ECDSAP384SHA384.to_string(),
     //         signer_name: Some(signer_name.clone().to_string()),
@@ -393,16 +388,16 @@ pub fn add_signers<A: Authority<Lookup = AuthLookup>>(authority: &mut A) -> Vec<
     #[cfg(feature = "dnssec-ring")]
     {
         let key_config = KeyConfig {
-            key_path: "tests/named_test_configs/dnssec/ed25519.pk8".to_string(),
+            key_path: "../../tests/test-data/named_test_configs/dnssec/ed25519.pk8".to_string(),
             password: None,
             algorithm: Algorithm::ED25519.to_string(),
-            signer_name: Some(signer_name.clone().to_string()),
+            signer_name: Some(signer_name.to_string()),
             is_zone_signing_key: Some(true),
             is_zone_update_auth: Some(false),
         };
 
         let signer = key_config
-            .try_into_signer(signer_name.clone())
+            .try_into_signer(signer_name)
             .expect("failed to read key_config");
         keys.push(signer.to_dnskey().expect("failed to create DNSKEY"));
         authority
@@ -419,9 +414,9 @@ macro_rules! define_dnssec_test {
         $(
             #[test]
             fn $f () {
-                let mut authority = ::$new("tests/named_test_configs/example.com.zone", module_path!(), stringify!($f));
-                let keys = ::authority_battery::dnssec::add_signers(&mut authority);
-                ::authority_battery::dnssec::$f(authority, &keys);
+                let mut authority = crate::$new("../../tests/test-data/named_test_configs/example.com.zone", module_path!(), stringify!($f));
+                let keys = crate::authority_battery::dnssec::add_signers(&mut authority);
+                crate::authority_battery::dnssec::$f(authority, &keys);
             }
         )*
     }
