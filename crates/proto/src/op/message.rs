@@ -136,6 +136,8 @@ impl Message {
 
     /// Returns a Message constructed with error details to return to a client
     ///
+    /// If the `response_code` requires an EDNS section, this function creates one if not already present.
+    ///
     /// # Arguments
     ///
     /// * `id` - message id should match the request message id
@@ -222,6 +224,9 @@ impl Message {
     /// see `Header::set_response_code`
     pub fn set_response_code(&mut self, response_code: ResponseCode) -> &mut Self {
         self.header.set_response_code(response_code);
+        if response_code.high() != 0 {
+            self.edns_mut().set_rcode_high(response_code.high());
+        }
         self
     }
 
@@ -521,11 +526,7 @@ impl Message {
 
     /// If edns is_none, this will create a new default Edns.
     pub fn edns_mut(&mut self) -> &mut Edns {
-        if self.edns.is_none() {
-            self.edns = Some(Edns::new());
-        }
-
-        self.edns.as_mut().unwrap()
+        self.edns.get_or_insert_with(Edns::new)
     }
 
     /// # Return value
@@ -1043,6 +1044,19 @@ fn test_emit_and_read_records() {
     message.add_additional(Record::new());
     message.update_counts(); // needed for the comparison...
 
+    test_emit_and_read(message);
+}
+
+#[test]
+fn test_extended_response_code() {
+    let mut message = Message::new();
+    message.set_response_code(ResponseCode::BADCOOKIE);
+    test_emit_and_read(message);
+}
+
+#[test]
+fn test_extended_response_code_error() {
+    let message = Message::error_msg(0, OpCode::Query, ResponseCode::BADVERS);
     test_emit_and_read(message);
 }
 

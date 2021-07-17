@@ -174,6 +174,8 @@ impl<'q> MessageResponseBuilder<'q> {
 
     /// Constructs a new error MessageResponse with associated settings
     ///
+    /// If the `response_code` requires an EDNS section, this function creates one if not already present.
+    ///
     /// # Arguments
     ///
     /// * `id` - request id to which this is a response
@@ -188,8 +190,13 @@ impl<'q> MessageResponseBuilder<'q> {
         let mut header = Header::default();
         header.set_message_type(MessageType::Response);
         header.set_id(id);
-        header.set_response_code(response_code);
         header.set_op_code(op_code);
+        header.set_response_code(response_code);
+        let mut edns = self.edns;
+        if response_code.high() != 0 {
+            edns.get_or_insert_with(Edns::new)
+                .set_rcode_high(response_code.high());
+        }
 
         MessageResponse {
             header,
@@ -199,7 +206,7 @@ impl<'q> MessageResponseBuilder<'q> {
             soa: Box::new(None.into_iter()),
             additionals: Box::new(None.into_iter()),
             sig0: self.sig0.unwrap_or_default(),
-            edns: self.edns,
+            edns,
         }
     }
 }
@@ -285,5 +292,27 @@ mod tests {
         assert!(response.header().truncated());
         assert_eq!(response.answer_count(), 0);
         assert!(response.name_server_count() > 1);
+    }
+
+    #[test]
+    fn test_extended_response_codes() {
+        let mut buf = Vec::with_capacity(512);
+        {
+            let mut encoder = BinEncoder::new(&mut buf);
+            encoder.set_max_size(512);
+
+            let message = MessageResponseBuilder {
+                queries: None,
+                sig0: None,
+                edns: None,
+            };
+            message
+                .error_msg(0, OpCode::Query, ResponseCode::BADCOOKIE)
+                .destructive_emit(&mut encoder)
+                .expect("failed to encode");
+        }
+
+        let response = Message::from_vec(&buf).expect("failed to decode");
+        assert_eq!(response.response_code(), ResponseCode::BADCOOKIE);
     }
 }
